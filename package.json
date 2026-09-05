@@ -1,0 +1,51 @@
+{
+  "name": "oasis-documents",
+  "productName": "Oasis Documents",
+  "version": "0.1.0",
+  "description": "个人数字资产管理与多模态检索中心",
+  "main": "out/main/index.js",
+  "author": "stanwu",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "dist": "electron-vite build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "^0.18.0",
+    "axios": "^1.7.9",
+    "better-sqlite3": "^13.0.3",
+    "cheerio": "^1.0.0",
+    "chokidar": "^4.0.3",
+    "exifr": "^7.1.3",
+    "fast-xml-parser": "^4.5.1",
+    "ffmpeg-static": "^5.3.0",
+    "mammoth": "^1.9.0",
+    "mime-types": "^2.1.35",
+    "onnxruntime-node": "^1.20.1",
+    "p-queue": "^8.1.0",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "sharp": "^0.33.5",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6"
+  }
+}

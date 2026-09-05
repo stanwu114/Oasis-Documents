@@ -1,0 +1,24 @@
+appId: com.oasis.documents
+productName: Oasis Documents
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - package.json
+  - "!**/*.map"
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/**"
+  - "node_modules/sharp/**"
+  - "node_modules/@lancedb/lancedb/**"
+  - "node_modules/onnxruntime-node/**"
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  extendInfo:
+    NSHighResolutionCapable: true
