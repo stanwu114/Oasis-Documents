@@ -16,12 +16,13 @@ import { addWatch, removeWatch } from './indexer/watcher'
 import { reindexPending, embeddingQueueSize } from './indexer/embedding-pipeline'
 import { autoTagSmart, mergeTags } from './autotag'
 import { classifyExt } from '../shared/classify'
+import { isUnderRoot } from './path-boundary'
 import { getImportProgress } from './import-progress'
 import { persistEmbeddingSettings, hydrateEmbeddingSettings } from './credentials'
 import * as ioModule from './io'
 import { videoSidecar } from './video/sidecar'
 import { searchByText, searchImagesByText, searchByImage, embedderStatus } from './search'
-import { invalidateEmbedderCache } from './embedder'
+import { invalidateEmbedderCache, embedderReadiness } from './embedder'
 import { modelStatuses, downloadModel } from './models/manager'
 import { importLink, listPlugins } from './platforms'
 import { addSubscription, refreshSubscription, refreshAll } from './subscriptions/rss'
@@ -42,6 +43,7 @@ export function registerIpc(): void {
   registerImportIpc()
   registerNotesIpc()
   registerIoIpc()
+  registerDiagnosticsIpc()
   registerVideoIpc()
 }
 
@@ -257,8 +259,7 @@ function registerFilesIpc(): void {
 
     /* R02：目录边界精确匹配——前缀 LIKE 会把 work 误清成 work-old；
        仅匹配 path 本身或 path + '/' 开头的记录 */
-    const underRoot = (p: string | null): boolean =>
-      p === path || (p !== null && p.startsWith(`${path}/`))
+    const underRoot = (p: string | null): boolean => isUnderRoot(p, path)
 
     /* 先取缩略图路径用于清理文件 */
     const localRows = (
@@ -430,6 +431,42 @@ function registerSearchIpc(): void {
 /* ---- 导入进度（事件推送 + 轮询双通道，UI 收敛不依赖单点） ---- */
 function registerImportIpc(): void {
   ipcMain.handle('import:status', () => getImportProgress())
+}
+
+/* ---- 12.2：索引状态诊断 ---- */
+function registerDiagnosticsIpc(): void {
+  ipcMain.handle('diag:indexStats', () => {
+    const db = getDb()
+    const ready = embedderReadiness()
+    const pending = (db.prepare(`SELECT COUNT(*) AS n FROM contents WHERE needs_reindex = 1`).get() as { n: number }).n
+    const indexed = (db.prepare(`SELECT COUNT(*) AS n FROM contents WHERE indexed_at IS NOT NULL`).get() as { n: number }).n
+    const byType = db
+      .prepare(`SELECT type, COUNT(*) AS n FROM contents GROUP BY type`)
+      .all() as { type: string; n: number }[]
+    const ftsRows = (() => {
+      try {
+        return (db.prepare(`SELECT COUNT(*) AS n FROM contents_fts`).get() as { n: number }).n
+      } catch {
+        return -1 /* FTS 不可用 */
+      }
+    })()
+    const recentErrors = db
+      .prepare(
+        `SELECT json_extract(meta, '$.embedError') AS err, COUNT(*) AS n
+         FROM contents WHERE json_extract(meta, '$.embedError') IS NOT NULL
+         GROUP BY err ORDER BY n DESC LIMIT 10`
+      )
+      .all() as { err: string; n: number }[]
+    return {
+      pending,
+      indexed,
+      byType: Object.fromEntries(byType.map((r) => [r.type, r.n])),
+      queueSize: embeddingQueueSize(),
+      ftsRows,
+      recentErrors,
+      model: { textReady: ready.textReady, imageReady: ready.imageReady }
+    }
+  })
 }
 
 /* ---- 视频检索（SentrySearch sidecar） ---- */

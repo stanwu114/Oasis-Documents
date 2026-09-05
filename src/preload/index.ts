@@ -93,6 +93,9 @@ const api: OasisAPI = {
     readFile: (path) => ipcRenderer.invoke('io:readFile', path),
     writeFile: (path, content) => ipcRenderer.invoke('io:writeFile', path, content)
   },
+  diag: {
+    indexStats: () => ipcRenderer.invoke('diag:indexStats')
+  },
   importStatus: () => ipcRenderer.invoke('import:status'),
   models: {
     status: () => ipcRenderer.invoke('models:status'),

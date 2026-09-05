@@ -350,6 +350,19 @@ export interface OasisAPI {
     writeFile(path: string, content: string): Promise<void>
   }
 
+  /* 12.2：索引状态诊断 */
+  diag: {
+    indexStats(): Promise<{
+      pending: number
+      indexed: number
+      byType: Record<string, number>
+      queueSize: number
+      ftsRows: number
+      recentErrors: { err: string; n: number }[]
+      model: { textReady: boolean; imageReady: boolean }
+    }>
+  }
+
   /* 导入进度轮询（事件推送的兜底通道） */
   importStatus(): Promise<ImportProgress>
 

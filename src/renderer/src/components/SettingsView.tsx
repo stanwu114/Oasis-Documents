@@ -14,11 +14,13 @@ export function SettingsView(): React.ReactNode {
   const [embedding, setEmbedding] = useState<EmbeddingSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [models, setModels] = useState<ModelStatus[]>([])
+  const [stats, setStats] = useState<Awaited<ReturnType<typeof window.oasis.diag.indexStats>> | null>(null)
 
   useEffect(() => {
     void window.oasis.files.getWatchPaths().then(setWatchPaths)
     void window.oasis.settings.getEmbedding().then(setEmbedding)
     void window.oasis.models.status().then(setModels)
+    void window.oasis.diag.indexStats().then(setStats)
     const off = window.oasis.on.modelProgress((s) => {
       setModels((prev) => prev.map((m) => (m.name === s.name ? s : m)))
     })
@@ -253,6 +255,35 @@ export function SettingsView(): React.ReactNode {
           </div>
         </section>
       ) : null}
+
+      {/* 12.2：索引状态诊断 */}
+      <section className="settings-section">
+        <h3>索引状态</h3>
+        {stats ? (
+          <>
+            <div className="settings-row"><span>已索引 / 待处理</span><span className="settings-value">{stats.indexed} / {stats.pending}</span></div>
+            <div className="settings-row"><span>嵌入队列</span><span className="settings-value">{stats.queueSize === 0 ? '空闲' : `${stats.queueSize} 个任务`}</span></div>
+            <div className="settings-row"><span>全文索引（FTS5）</span><span className={stats.ftsRows >= 0 ? 'settings-value ok' : 'settings-value muted'}>{stats.ftsRows >= 0 ? `${stats.ftsRows} 条` : '不可用（回退 LIKE）'}</span></div>
+            <div className="settings-row"><span>文本模型</span><span className={stats.model.textReady ? 'settings-value ok' : 'settings-value muted'}>{stats.model.textReady ? '就绪' : '未就绪'}</span></div>
+            <div className="settings-row"><span>图片模型（CLIP）</span><span className={stats.model.imageReady ? 'settings-value ok' : 'settings-value muted'}>{stats.model.imageReady ? '就绪' : '未就绪'}</span></div>
+            {Object.keys(stats.byType).length > 0 ? (
+              <div className="settings-row"><span>内容分布</span>
+                <span className="settings-value">{Object.entries(stats.byType).map(([k, v]) => `${k}:${v}`).join(' · ')}</span>
+              </div>
+            ) : null}
+            {stats.recentErrors.length > 0 ? (
+              <div style={{ marginTop: 8 }}>
+                <div className="report-head">嵌入失败原因</div>
+                {stats.recentErrors.map((e) => (
+                  <div key={e.err} className="report-fail-row"><span>· {String(e.err).slice(0, 60)}</span><span className="report-fail-count">×{e.n}</span></div>
+                ))}
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p className="settings-value">载入中…</p>
+        )}
+      </section>
 
       {/* F05：数据导入导出 */}
       <section className="settings-section">
