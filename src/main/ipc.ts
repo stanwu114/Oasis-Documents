@@ -363,14 +363,18 @@ function registerFilesIpc(): void {
     const whereSql = `WHERE ${where.join(' AND ')}`
 
     const total = (db.prepare(`SELECT COUNT(*) as n FROM contents ${whereSql}`).get(...(params as never[])) as { n: number }).n
-    const counts = opts?.dir
-      ? (db
-          .prepare(`SELECT type, COUNT(*) as n FROM contents ${whereSql} GROUP BY type`)
-          .all(...(params as never[])) as { type: string; n: number }[])
-      : (db.prepare(`SELECT type, COUNT(*) as n FROM contents WHERE source_path IS NOT NULL GROUP BY type`).all() as {
-          type: string
-          n: number
-        }[])
+    /* 分类计数：数组转 Record（前端按 counts[type] 取值；此前返回数组导致
+       前端取键恒为 undefined，"全部"外的 tab 计数全部显示 0） */
+    const countRows = (
+      opts?.dir
+        ? (db
+            .prepare(`SELECT type, COUNT(*) as n FROM contents ${whereSql} GROUP BY type`)
+            .all(...(params as never[])) as { type: string; n: number }[])
+        : (db
+            .prepare(`SELECT type, COUNT(*) as n FROM contents WHERE source_path IS NOT NULL GROUP BY type`)
+            .all() as { type: string; n: number }[])
+    ).filter((r) => r.type !== 'webpage' && r.type !== 'note')
+    const counts: Record<string, number> = Object.fromEntries(countRows.map((r) => [r.type, r.n]))
     const rows = db
       .prepare(
         `SELECT id, type, title, source_path, thumbnail_path, url, mime_type, file_size, created_at
