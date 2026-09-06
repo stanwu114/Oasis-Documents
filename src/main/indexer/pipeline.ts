@@ -113,6 +113,9 @@ export async function indexFiles(
           ftsUpsert(existing.id, titleFromPath(path), ex.text)
           reportIndexResult('ok')
           if (enqueueEmbedding(existing.id, ex.category, ex, path)) enqueued++
+          else {
+            db.prepare(`UPDATE contents SET needs_reindex = 0 WHERE id = ?`).run(existing.id)
+          }
         } else {
           ensureSession()
           const ex = await extractContent(path, thumbs, hash)
@@ -140,6 +143,10 @@ export async function indexFiles(
           ftsUpsert(contentId, titleFromPath(path), ex.text)
           reportIndexResult('ok')
           if (enqueueEmbedding(contentId, ex.category, ex, path)) enqueued++
+          else {
+            /* 无嵌入价值（音频/图纸/空文本）——直接完成，不滞留待嵌入 */
+            db.prepare(`UPDATE contents SET needs_reindex = 0 WHERE id = ?`).run(contentId)
+          }
         }
       } catch (err) {
         failed++
