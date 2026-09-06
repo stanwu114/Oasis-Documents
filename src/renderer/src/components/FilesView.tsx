@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 import { toMediaUrl } from '../lib/media'
 import { useUiStore } from '../stores/uiStore'
+import { MasonryGrid } from './MasonryGrid'
 import { CATEGORY_LABEL, MASONRY_CATEGORIES, type FileCategory } from '../../../shared/classify'
 import type { FileListRow } from '../../../shared/ipc'
 
@@ -122,33 +123,49 @@ export function FilesView(): React.ReactNode {
 
       {/* 瀑布流（图片/视频/图纸） */}
       {useMasonry && visible.length > 0 ? (
-        <div className="masonry">
-          {visible.map((r) => (
-            <button
-              key={r.id}
-              type="button"
-              className="note-card"
-              onClick={() => useUiStore.getState().openDetail(r.id)}
-              title={r.full_name}
-            >
-              <div className={`note-card-cover ${r.thumbnail_path ? '' : 'placeholder'}`}>
-                {r.thumbnail_path ? (
-                  <img src={toMediaUrl(r.thumbnail_path) ?? undefined} alt={r.title} loading="lazy" />
-                ) : (
-                  <span className="note-card-cover-platform">
-                    <Icon name={CAT_ICON[r.category] ?? 'doc'} size={24} />
-                    <em>{(r.ext || r.category).toUpperCase()}</em>
-                  </span>
-                )}
-                {r.category === 'video' ? <span className="video-play-mark">▶</span> : null}
-              </div>
-              <div className="note-card-body">
-                <span className="note-card-title">{r.full_name}</span>
-                <span className="note-card-meta">{fmtTime(r.modified_at)}{r.file_size ? ` · ${fmtBytes(r.file_size)}` : ''}</span>
-              </div>
-            </button>
-          ))}
-        </div>
+        <MasonryGrid
+          items={visible.map((r) => ({ key: r.id }))}
+          hasImage={(it) => {
+            const r = visible.find((x) => x.id === it.key)
+            return Boolean(r?.thumbnail_path)
+          }}
+          render={(_it, onImageLoad, style) => {
+            const r = visible.find((x) => x.id === _it.key)
+            if (!r) return null
+            return (
+              <button
+                type="button"
+                key={r.id}
+                className="note-card"
+                style={style}
+                onClick={() => useUiStore.getState().openDetail(r.id)}
+                title={r.full_name}
+              >
+                <div className={`note-card-cover ${r.thumbnail_path ? '' : 'placeholder'}`}>
+                  {r.thumbnail_path ? (
+                    <img
+                      src={toMediaUrl(r.thumbnail_path) ?? undefined}
+                      alt={r.title}
+                      loading="lazy"
+                      data-mkey={r.id}
+                      onLoad={(e) => onImageLoad(e.currentTarget)}
+                    />
+                  ) : (
+                    <span className="note-card-cover-platform">
+                      <Icon name={CAT_ICON[r.category] ?? 'doc'} size={24} />
+                      <em>{(r.ext || r.category).toUpperCase()}</em>
+                    </span>
+                  )}
+                  {r.category === 'video' ? <span className="video-play-mark">▶</span> : null}
+                </div>
+                <div className="note-card-body">
+                  <span className="note-card-title">{r.full_name}</span>
+                  <span className="note-card-meta">{fmtTime(r.modified_at)}{r.file_size ? ` · ${fmtBytes(r.file_size)}` : ''}</span>
+                </div>
+              </button>
+            )
+          }}
+        />
       ) : null}
 
       {/* 列表（全部 / 音频 / 文档 / 其他） */}

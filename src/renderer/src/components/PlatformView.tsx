@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 import { useUiStore } from '../stores/uiStore'
 import { toMediaUrl } from '../lib/media'
+import { MasonryGrid } from './MasonryGrid'
 
 interface PlatformRow {
   id: string
@@ -121,46 +122,59 @@ export function PlatformView(): React.ReactNode {
       ) : null}
 
       {filtered.length > 0 ? (
-        <div className="masonry">
-          {filtered.map((r) => (
-            <a
-              key={r.id}
-              className="note-card"
-              href={r.url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => {
-                /* F03：卡片进入纯净阅读，详情内保留「打开原文」直达 */
-                e.preventDefault()
-                useUiStore.getState().openDetail(r.id)
-              }}
-            >
-              <div className={`note-card-cover ${r.thumbnail_path ? '' : 'placeholder'}`}>
-                {r.thumbnail_path ? (
-                  <img src={toMediaUrl(r.thumbnail_path) ?? undefined} alt={r.title} loading="lazy" />
-                ) : (
-                  <span className="note-card-cover-platform">
-                    <Icon name="doc" size={26} />
-                    <em>{PLATFORM_LABEL[r.platform] ?? r.platform}</em>
-                  </span>
-                )}
-                <span className="note-card-badge">{PLATFORM_LABEL[r.platform] ?? r.platform}</span>
-              </div>
-              <div className="note-card-body">
-                <span className="note-card-title">{r.title}</span>
-                {r.snippet ? <span className="note-card-desc">{r.snippet}</span> : null}
-                {r.tags.length > 0 ? (
-                  <div className="note-card-tags">
-                    {r.tags.slice(0, 4).map((t) => (
-                      <span key={t} className="note-tag">#{t}</span>
-                    ))}
-                  </div>
-                ) : null}
-                <span className="note-card-meta">{fmtDate(r.created_at)}</span>
-              </div>
-            </a>
-          ))}
-        </div>
+        <MasonryGrid
+          items={filtered.map((r) => ({ key: r.id }))}
+          hasImage={(it) => Boolean(filtered.find((x) => x.id === it.key)?.thumbnail_path)}
+          render={(_it, onImageLoad, style) => {
+            const r = filtered.find((x) => x.id === _it.key)
+            if (!r) return null
+            return (
+              <a
+                key={r.id}
+                className="note-card"
+                style={style}
+                href={r.url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => {
+                  /* F03：卡片进入纯净阅读，详情内保留「打开原文」直达 */
+                  e.preventDefault()
+                  useUiStore.getState().openDetail(r.id)
+                }}
+              >
+                <div className={`note-card-cover ${r.thumbnail_path ? '' : 'placeholder'}`}>
+                  {r.thumbnail_path ? (
+                    <img
+                      src={toMediaUrl(r.thumbnail_path) ?? undefined}
+                      alt={r.title}
+                      loading="lazy"
+                      data-mkey={r.id}
+                      onLoad={(e) => onImageLoad(e.currentTarget)}
+                    />
+                  ) : (
+                    <span className="note-card-cover-platform">
+                      <Icon name="doc" size={26} />
+                      <em>{PLATFORM_LABEL[r.platform] ?? r.platform}</em>
+                    </span>
+                  )}
+                  <span className="note-card-badge">{PLATFORM_LABEL[r.platform] ?? r.platform}</span>
+                </div>
+                <div className="note-card-body">
+                  <span className="note-card-title">{r.title}</span>
+                  {r.snippet ? <span className="note-card-desc">{r.snippet}</span> : null}
+                  {r.tags.length > 0 ? (
+                    <div className="note-card-tags">
+                      {r.tags.slice(0, 4).map((t) => (
+                        <span key={t} className="note-tag">#{t}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <span className="note-card-meta">{fmtDate(r.created_at)}</span>
+                </div>
+              </a>
+            )
+          }}
+        />
       ) : (
         <div className="search-results-empty">
           <Icon name="doc" size={28} />

@@ -977,3 +977,27 @@ input:focus-visible, textarea:focus-visible { outline: none; }
 /* ============ F04：规则表单 ============ */
 .rule-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .rule-form .settings-input, .rule-form .settings-select { min-width: 130px; }
+
+/* ============ 绝对定位瀑布流（固定高卡片，永不交叉） ============ */
+.masonry-abs .note-card {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  overflow: hidden;
+}
+.masonry-abs .note-card-cover {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.masonry-abs .note-card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover; /* 封面铺满分配区域，真实比例用于布局 */
+}
+.masonry-abs .note-card-cover.placeholder { height: auto; flex: 1; }
+.masonry-abs .note-card-body {
+  height: 66px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
