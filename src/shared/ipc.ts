@@ -350,6 +350,29 @@ export interface OasisAPI {
     writeFile(path: string, content: string): Promise<void>
   }
 
+  /* Newsletter / IMAP（后置能力） */
+  newsletter: {
+    conf(): Promise<{
+      enabled: boolean
+      host: string
+      port: number
+      user: string
+      passwordRef: string
+      tls: boolean
+      fromFilters: string[]
+      passwordConfigured: boolean
+    }>
+    save(input: { enabled?: boolean; host?: string; port?: number; user?: string; password?: string; tls?: boolean; fromFilters?: string[] }): Promise<void>
+    sync(): Promise<{ fetched: number; archived: number; error?: string }>
+  }
+
+  /* L3 平台账号 */
+  accounts: {
+    list(): Promise<{ id: string; label: string; lastAction: number | null }[]>
+    login(id: string): Promise<boolean>
+    subscribeMp(name: string, rsshubBase?: string): Promise<{ id: number; feedUrl: string }>
+  }
+
   /* 12.2：索引状态诊断 */
   diag: {
     indexStats(): Promise<{

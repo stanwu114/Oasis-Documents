@@ -93,6 +93,16 @@ const api: OasisAPI = {
     readFile: (path) => ipcRenderer.invoke('io:readFile', path),
     writeFile: (path, content) => ipcRenderer.invoke('io:writeFile', path, content)
   },
+  newsletter: {
+    conf: () => ipcRenderer.invoke('newsletter:conf'),
+    save: (input) => ipcRenderer.invoke('newsletter:save', input),
+    sync: () => ipcRenderer.invoke('newsletter:sync')
+  },
+  accounts: {
+    list: () => ipcRenderer.invoke('accounts:list'),
+    login: (id) => ipcRenderer.invoke('accounts:login', id),
+    subscribeMp: (name, base) => ipcRenderer.invoke('accounts:subscribeMp', name, base)
+  },
   diag: {
     indexStats: () => ipcRenderer.invoke('diag:indexStats')
   },

@@ -6,6 +6,7 @@ import { closeDb } from './db'
 import { startWatching, stopWatching, onIndexProgress } from './indexer/watcher'
 import { reindexPending } from './indexer/embedding-pipeline'
 import { startRssScheduler } from './subscriptions/rss'
+import { startNewsletterScheduler } from './newsletter'
 import { getMediaDir, getThumbnailsDir } from './dataLocation'
 
 /* 媒体协议：渲染进程（http/dev 或 file/prod）统一经此加载本地图片，
@@ -83,6 +84,9 @@ app.whenReady().then(() => {
 
   /* F05：RSS 持久调度（每 30 分钟检查，单源最小间隔 1 小时，连续失败自动禁用） */
   startRssScheduler()
+
+  /* Newsletter/IMAP：启用时定时拉取（每 30 分钟） */
+  startNewsletterScheduler()
 
   createWindow()
 

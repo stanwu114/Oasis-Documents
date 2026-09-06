@@ -256,6 +256,12 @@ export function SettingsView(): React.ReactNode {
         </section>
       ) : null}
 
+      {/* Newsletter / IMAP 邮件订阅 */}
+      <NewsletterSection />
+
+      {/* L3 平台账号 */}
+      <PlatformAccountsSection />
+
       {/* 12.2：索引状态诊断 */}
       <section className="settings-section">
         <h3>索引状态</h3>
@@ -453,5 +459,133 @@ function ProviderForm({
         在线失败时自动降级本地模型（若已下载）。API Key 通过系统钥匙串加密。
       </p>
     </>
+  )
+}
+
+
+/* ============ Newsletter / IMAP 配置 ============ */
+function NewsletterSection(): React.ReactNode {
+  const [conf, setConf] = useState<Awaited<ReturnType<typeof window.oasis.newsletter.conf>> | null>(null)
+  const [host, setHost] = useState('')
+  const [user, setUser] = useState('')
+  const [password, setPassword] = useState('')
+  const [filters, setFilters] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    void window.oasis.newsletter.conf().then((c) => {
+      setConf(c)
+      setHost(c.host)
+      setUser(c.user)
+      setFilters(c.fromFilters.join(', '))
+    })
+  }, [])
+
+  const save = async (enabled?: boolean): Promise<void> => {
+    setBusy(true)
+    try {
+      await window.oasis.newsletter.save({
+        enabled: enabled ?? conf?.enabled,
+        host,
+        user,
+        ...(password ? { password } : {}),
+        fromFilters: filters.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+      })
+      setPassword('')
+      const c = await window.oasis.newsletter.conf()
+      setConf(c)
+      useUiStore.getState().showToast('邮件订阅配置已保存')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const syncNow = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const r = await window.oasis.newsletter.sync()
+      if (r.error) useUiStore.getState().showToast(`拉取失败：${r.error}`, 'error')
+      else useUiStore.getState().showToast(`拉取 ${r.fetched} 封，归档 ${r.archived} 封`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!conf) return null
+  return (
+    <section className="settings-section">
+      <h3>邮件订阅（IMAP 归档）</h3>
+      <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 10 }}>
+        定时拉取邮箱订阅邮件，正文进入统一检索。密码经系统钥匙串加密，仅用于 IMAP 登录。
+      </p>
+      <div className="settings-row"><span>启用</span>
+        <button type="button" className={`btn small ${conf.enabled ? 'primary' : 'ghost'}`} disabled={busy} onClick={() => void save(!conf.enabled)}>
+          {conf.enabled ? '已启用' : '未启用'}
+        </button>
+      </div>
+      <div className="settings-row"><span>IMAP 服务器</span>
+        <input className="settings-input" style={{ width: 260 }} placeholder="imap.qq.com" value={host} onChange={(e) => setHost(e.target.value)} />
+      </div>
+      <div className="settings-row"><span>账号</span>
+        <input className="settings-input" style={{ width: 260 }} value={user} onChange={(e) => setUser(e.target.value)} />
+      </div>
+      <div className="settings-row"><span>{conf.passwordConfigured ? '密码（已配置，留空不修改）' : '密码 / 授权码'}</span>
+        <input className="settings-input" style={{ width: 260 }} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      </div>
+      <div className="settings-row"><span>发件人过滤（逗号分隔，空=全部）</span>
+        <input className="settings-input" style={{ width: 260 }} placeholder="newsletter, 周刊" value={filters} onChange={(e) => setFilters(e.target.value)} />
+      </div>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
+        <button type="button" className="btn ghost" onClick={() => void syncNow()} disabled={busy || !conf.enabled}>立即拉取</button>
+        <button type="button" className="btn primary" onClick={() => void save()} disabled={busy}>保存</button>
+      </div>
+    </section>
+  )
+}
+
+/* ============ L3 平台账号 ============ */
+function PlatformAccountsSection(): React.ReactNode {
+  const [accounts, setAccounts] = useState<Awaited<ReturnType<typeof window.oasis.accounts.list>>>([])
+  const [mpName, setMpName] = useState('')
+
+  useEffect(() => {
+    void window.oasis.accounts.list().then(setAccounts)
+  }, [])
+
+  return (
+    <section className="settings-section">
+      <h3>平台账号（L3）</h3>
+      <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 10 }}>
+        登录态保存在独立持久会话中（不与主窗口共享）。仅承载登录与手动同步；
+        <b style={{ color: 'var(--danger)' }}>频繁自动抓取有封号风险</b>，本应用不做后台自动爬取。
+      </p>
+      {accounts.map((a) => (
+        <div key={a.id} className="settings-row">
+          <span>{a.label}</span>
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {a.lastAction ? <span className="settings-value muted">{new Date(a.lastAction).toLocaleDateString('zh-CN')} 活动过</span> : null}
+            <button type="button" className="btn small ghost" onClick={async () => {
+              await window.oasis.accounts.login(a.id)
+              setAccounts(await window.oasis.accounts.list())
+            }}>打开登录窗口</button>
+          </span>
+        </div>
+      ))}
+      <div className="settings-row" style={{ marginTop: 6 }}>
+        <span>订阅公众号（RSSHub 桥接，无需微信登录）</span>
+        <span style={{ display: 'flex', gap: 8 }}>
+          <input className="settings-input" style={{ width: 180 }} placeholder="公众号名称" value={mpName} onChange={(e) => setMpName(e.target.value)} />
+          <button type="button" className="btn small primary" disabled={!mpName.trim()} onClick={async () => {
+            try {
+              await window.oasis.accounts.subscribeMp(mpName.trim())
+              useUiStore.getState().showToast(`已订阅公众号「${mpName.trim()}」，文章将出现在订阅时间线`)
+              setMpName('')
+            } catch (e) {
+              useUiStore.getState().showToast(`订阅失败：${e instanceof Error ? e.message : e}`, 'error')
+            }
+          }}>订阅</button>
+        </span>
+      </div>
+    </section>
   )
 }

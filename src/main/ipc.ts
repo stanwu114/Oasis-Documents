@@ -14,6 +14,8 @@ import {
 } from './organizer/executor'
 import { addWatch, removeWatch } from './indexer/watcher'
 import { reindexPending, embeddingQueueSize } from './indexer/embedding-pipeline'
+import { getNewsletterConf, saveNewsletterConf, syncNewsletter } from './newsletter'
+import { openPlatformLogin, subscribeWechatMp, accountActivity } from './platforms/accounts'
 import { autoTagSmart, mergeTags } from './autotag'
 import { classifyExt } from '../shared/classify'
 import { isUnderRoot } from './path-boundary'
@@ -44,6 +46,7 @@ export function registerIpc(): void {
   registerNotesIpc()
   registerIoIpc()
   registerDiagnosticsIpc()
+  registerNewsletterIpc()
   registerVideoIpc()
 }
 
@@ -431,6 +434,17 @@ function registerSearchIpc(): void {
 /* ---- 导入进度（事件推送 + 轮询双通道，UI 收敛不依赖单点） ---- */
 function registerImportIpc(): void {
   ipcMain.handle('import:status', () => getImportProgress())
+}
+
+/* ---- Newsletter / L3 平台账号 ---- */
+function registerNewsletterIpc(): void {
+  ipcMain.handle('newsletter:conf', () => getNewsletterConf())
+  ipcMain.handle('newsletter:save', (_e, input: Parameters<typeof saveNewsletterConf>[0]) => saveNewsletterConf(input))
+  ipcMain.handle('newsletter:sync', async () => syncNewsletter())
+
+  ipcMain.handle('accounts:list', () => accountActivity())
+  ipcMain.handle('accounts:login', (_e, id: string) => openPlatformLogin(id))
+  ipcMain.handle('accounts:subscribeMp', (_e, name: string, rsshubBase?: string) => subscribeWechatMp(name, rsshubBase))
 }
 
 /* ---- 12.2：索引状态诊断 ---- */
