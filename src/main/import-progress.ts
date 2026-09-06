@@ -145,18 +145,22 @@ export function classifyError(err: unknown): string {
   return msg.length > 40 ? `${msg.slice(0, 40)}…` : msg
 }
 
-/** 一批文件开始索引；空闲→忙碌时开启新会话（清零统计） */
+/** 一批文件开始索引；空闲(或上一会话只剩嵌入收尾)→忙碌时开启新会话（清零统计）
+ *  注意:上次导入的向量化还在跑(phase='embedding')时来新批次必须开新会话——
+ *  否则 sessionId 不变,前端弹窗按"同一会话"不重弹,用户侧表现为"没有进度条" */
 export function beginIndexSession(total: number): void {
   const wasIdle = state.phase === 'idle' || state.phase === 'done'
+  const embeddingTail = state.phase === 'embedding' && activeBatches === 0
+  const fresh = wasIdle || embeddingTail
   activeBatches++
   state = {
     ...state,
-    ... (wasIdle ? freshStats() : {}),
+    ...(fresh ? freshStats() : {}),
     phase: 'indexing',
-    total: wasIdle ? total : state.total + total,
-    done: wasIdle ? 0 : state.done,
+    total: fresh ? total : state.total + total,
+    done: fresh ? 0 : state.done,
     percent: 0,
-    sessionId: wasIdle ? state.sessionId + 1 : state.sessionId
+    sessionId: fresh ? state.sessionId + 1 : state.sessionId
   }
   touch()
   ensureHeartbeat()

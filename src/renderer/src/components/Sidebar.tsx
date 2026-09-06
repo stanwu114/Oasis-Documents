@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useUiStore, type View } from '../stores/uiStore'
 import { Icon } from './Icon'
+import { platformLabel } from '../../../shared/platform'
 
 interface WatchTree {
   watchPath: string
@@ -8,21 +9,50 @@ interface WatchTree {
   subDirs: { name: string; path: string }[]
 }
 
+interface PlatformGroup {
+  platform: string
+  count: number
+}
+
 export function Sidebar(): React.ReactNode {
   const view = useUiStore((s) => s.view)
   const theme = useUiStore((s) => s.theme)
   const currentDir = useUiStore((s) => s.currentDir)
   const importProgress = useUiStore((s) => s.importProgress)
+  const collectionPlatform = useUiStore((s) => s.collectionPlatform)
+  const contentsVersion = useUiStore((s) => s.contentsVersion)
   const [tree, setTree] = useState<WatchTree[]>([])
   const [expanded, setExpanded] = useState(true)
+  /* 我的收藏:按平台分组的二级目录 */
+  const [platforms, setPlatforms] = useState<PlatformGroup[]>([])
+  const [collectionExpanded, setCollectionExpanded] = useState(true)
 
   const refreshTree = async (): Promise<void> => {
     setTree(await window.oasis.files.listSubDirs())
   }
 
+  const refreshCollections = async (): Promise<void> => {
+    try {
+      const rows = await window.oasis.platform.listContents()
+      const m = new Map<string, number>()
+      for (const r of rows) m.set(r.platform, (m.get(r.platform) ?? 0) + 1)
+      setPlatforms(
+        [...m.entries()]
+          .map(([platform, count]) => ({ platform, count }))
+          .sort((a, b) => b.count - a.count)
+      )
+    } catch {
+      setPlatforms([])
+    }
+  }
+
   useEffect(() => {
     void refreshTree()
   }, [view, currentDir])
+
+  useEffect(() => {
+    void refreshCollections()
+  }, [view, contentsVersion])
 
   const onImport = async (): Promise<void> => {
     const picked = await window.oasis.files.pickDirectories()
@@ -143,17 +173,75 @@ export function Sidebar(): React.ReactNode {
           </div>
         ) : null}
 
-        <button type="button" className={btn(view === 'organize')} onClick={() => nav('organize')}>
-          <Icon name="broom" size={15} /> 文件整理
+        {/* 我的收藏(紧随我的文件,二级目录按平台分组) */}
+        <button
+          type="button"
+          className={btn(view === 'platform' && !collectionPlatform)}
+          onClick={() => useUiStore.getState().openCollection(null)}
+        >
+          <Icon name="doc" size={15} /> 我的收藏
+          <span
+            role="button"
+            tabIndex={-1}
+            aria-label={collectionExpanded ? '收起平台列表' : '展开平台列表'}
+            className={`chevron${collectionExpanded ? ' open' : ''}`}
+            style={{
+              marginLeft: 'auto',
+              fontSize: 16,
+              lineHeight: 1,
+              color: collectionExpanded ? 'var(--accent)' : 'var(--fg-muted)',
+              padding: '2px 4px',
+              marginRight: -4,
+              transform: collectionExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+              transition: 'transform 0.18s ease, color 0.12s',
+              display: 'inline-flex',
+              alignItems: 'center',
+              cursor: 'pointer'
+            }}
+            onClick={(e) => {
+              e.stopPropagation()
+              setCollectionExpanded(!collectionExpanded)
+            }}
+          >
+            ›
+          </span>
         </button>
+
+        {collectionExpanded ? (
+          <div className="sidebar-tree">
+            {platforms.map((p) => (
+              <div
+                key={p.platform}
+                className={`tree-row${view === 'platform' && collectionPlatform === p.platform ? ' active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="tree-row-main"
+                  onClick={() => useUiStore.getState().openCollection(p.platform)}
+                  title={platformLabel(p.platform)}
+                >
+                  <Icon name="folder" size={13} />
+                  <span className="tree-name">{platformLabel(p.platform)}</span>
+                  <span className="tree-progress" title="收藏数">
+                    {p.count}
+                  </span>
+                </button>
+              </div>
+            ))}
+            {platforms.length === 0 ? (
+              <p className="tree-empty">粘贴链接导入后这里按平台显示</p>
+            ) : null}
+          </div>
+        ) : null}
+
         <button type="button" className={btn(view === 'search')} onClick={() => nav('search')}>
           <Icon name="search" size={15} /> 文件搜索
         </button>
-        <button type="button" className={btn(view === 'platform')} onClick={() => nav('platform')}>
-          <Icon name="doc" size={15} /> 文件收藏
+        <button type="button" className={btn(view === 'organize')} onClick={() => nav('organize')}>
+          <Icon name="broom" size={15} /> 文件整理
         </button>
-        <button type="button" className={btn(view === 'subscriptions')} onClick={() => nav('subscriptions')}>
-          <Icon name="rss" size={15} /> 新闻订阅
+        <button type="button" className={btn(view === 'status')} onClick={() => nav('status')}>
+          <Icon name="gauge" size={15} /> 系统状态
         </button>
       </nav>
 

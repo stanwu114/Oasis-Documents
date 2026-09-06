@@ -1,8 +1,9 @@
 import { createWriteStream, existsSync, mkdirSync, statSync, unlinkSync } from 'node:fs'
-import { rename } from 'node:fs/promises'
+import { rename, copyFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { app } from 'electron'
 import { getModelsDir } from '../dataLocation'
 import type { ModelStatus } from '../../shared/ipc'
 
@@ -14,6 +15,9 @@ import type { ModelStatus } from '../../shared/ipc'
      models/clip/clip-vit-b32-image.onnx 图片编码 (512d)
      models/clip/clip-vit-b32-text.onnx  文本对齐编码 (512d)
      models/clip/clip-vocab.json         CLIP 词表
+     models/clip-zh/cn_clip_vision.onnx  中文 CLIP 图片编码 (512d)
+     models/clip-zh/cn_clip_text.onnx    中文 CLIP 文本编码 (512d)
+     models/clip-zh/vocab.txt            中文 BERT 词表
    ================================================================ */
 
 type ProgressCb = (status: ModelStatus) => void
@@ -24,7 +28,7 @@ interface RemoteFile {
   local: string
 }
 
-const MODELS: Record<string, { files: RemoteFile[]; label: string }> = {
+const MODELS: Record<string, { files: RemoteFile[]; altFiles?: string[]; bundled?: boolean; label: string }> = {
   bge: {
     label: 'BGE-small-zh-v1.5（文本语义检索）',
     files: [
@@ -39,6 +43,19 @@ const MODELS: Record<string, { files: RemoteFile[]; label: string }> = {
       { repo: 'Xenova/clip-vit-base-patch32', remote: 'onnx/text_model_quantized.onnx', local: 'clip-vit-b32-text.onnx' },
       { repo: 'Xenova/clip-vit-base-patch32', remote: 'vocab.json', local: 'clip-vocab.json' },
       { repo: 'Xenova/clip-vit-base-patch32', remote: 'merges.txt', local: 'clip-merges.txt' }
+    ]
+  },
+  /* 中文 CLIP(以文搜图主力):优先安装内置 int8 量化版(约 190MB,
+     实测与 fp32 输出余弦 ≥0.97);内置缺失时网络兜底下载 fp32(约 750MB)。
+     三件套齐备时 embedder 自动优先启用,图片向量空间随之切换并全量重嵌 */
+  'clip-zh': {
+    label: '中文 CLIP ViT-B/16 int8（中文以文搜图/以图搜图，约 190MB，推荐）',
+    bundled: true,
+    altFiles: ['cn_clip_vision.int8.onnx', 'cn_clip_text.int8.onnx', 'vocab.txt'],
+    files: [
+      { repo: 'felixdu/chinese-clip-vit-base-patch16-onnx', remote: 'cn_clip_vision.onnx', local: 'cn_clip_vision.onnx' },
+      { repo: 'felixdu/chinese-clip-vit-base-patch16-onnx', remote: 'cn_clip_text.onnx', local: 'cn_clip_text.onnx' },
+      { repo: 'OFA-Sys/chinese-clip-vit-base-patch16', remote: 'vocab.txt', local: 'vocab.txt' }
     ]
   }
 }
@@ -56,7 +73,12 @@ export function modelStatuses(): ModelStatus[] {
       continue
     }
     const dir = join(getModelsDir(), key)
-    const downloaded = m.files.every((f) => existsSync(join(dir, f.local)) && statSync(join(dir, f.local)).size > 1000)
+    /* 内置 int8 变体或网络下载的完整文件集,任一齐备即视为已安装 */
+    const altOk = m.altFiles
+      ? m.altFiles.every((f) => existsSync(join(dir, f)) && statSync(join(dir, f)).size > 1000)
+      : false
+    const downloaded =
+      altOk || m.files.every((f) => existsSync(join(dir, f.local)) && statSync(join(dir, f.local)).size > 1000)
     out.push({
       name: key,
       downloaded,
@@ -92,6 +114,23 @@ export async function downloadModel(key: string, onProgress?: ProgressCb): Promi
   const emit = (): void => onProgress?.({ ...status })
 
   try {
+    /* 内置模型优先:resources/models 里的 int8 量化版直接复制,免下载秒装 */
+    if (m.bundled && m.altFiles) {
+      status.progress = 0.5
+      emit()
+      if (await copyBundledModels(key, m.altFiles)) {
+        status.downloading = false
+        status.downloaded = true
+        status.progress = 1
+        active.delete(key)
+        emit()
+        return
+      }
+      /* 内置缺失(如克隆仓库未带 models 目录):降级走网络下载 fp32 */
+      console.warn(`[models] ${key} 无内置文件,走网络下载兜底`)
+      status.progress = 0
+      emit()
+    }
     for (const f of m.files) {
       const target = join(dir, f.local)
       if (existsSync(target) && statSync(target).size > 1000) {
@@ -121,6 +160,25 @@ export async function downloadModel(key: string, onProgress?: ProgressCb): Promi
   }
   active.delete(key)
   emit()
+}
+
+/* ---- 内置模型:resources/models → 用户数据目录 ---- */
+
+/** 内置模型源目录:dev = <项目根>/resources/models;
+    打包后 = <Contents>/Resources/models(electron-builder extraResources) */
+function bundledModelsDir(key: string): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'models', key)
+    : join(app.getAppPath(), 'resources', 'models', key)
+}
+
+async function copyBundledModels(key: string, altFiles: string[]): Promise<boolean> {
+  const src = bundledModelsDir(key)
+  if (!altFiles.every((f) => existsSync(join(src, f)) && statSync(join(src, f)).size > 1000)) return false
+  const dir = join(getModelsDir(), key)
+  mkdirSync(dir, { recursive: true })
+  for (const f of altFiles) await copyFile(join(src, f), join(dir, f))
+  return true
 }
 
 /* ---- 断点记录：tmp 文件 + 完成后 rename ---- */

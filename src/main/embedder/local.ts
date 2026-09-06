@@ -265,21 +265,55 @@ export class LocalImageEmbedder implements ImageEmbedder {
   private imgSession: ort.InferenceSession | null = null
   private txtSession: ort.InferenceSession | null = null
   private clipTokenizer: ClipTokenizer | null = null
+  /* 中文 CLIP 文本塔是 BERT 系(WordPiece + vocab.txt),复用 BGE 同款分词器 */
+  private zhTokenizer: BgeTokenizer | null = null
   private imgMutex = new RunMutex()
   private txtMutex = new RunMutex()
   readonly info: EmbedderModelInfo
+  /** 当前激活的向量空间身份——中英 CLIP 同为 512 维但语义空间不兼容,
+      向量写入前必须以此校验(lancedb.ensureVectorSpace),防跨空间混写 */
+  readonly space: string
 
   constructor(private settings: EmbeddingSettings['local']) {
-    this.info = { name: 'clip-vit-b32', dimensions: 512, supportsImages: true, supportsBatch: true }
+    const zh = this.zhReady()
+    this.space = zh ? 'chinese-clip-vit-b16-zh' : 'clip-vit-b32-en'
+    this.info = { name: zh ? 'chinese-clip-vit-b16' : 'clip-vit-b32', dimensions: 512, supportsImages: true, supportsBatch: true }
   }
 
   get isReady(): boolean {
     return (
-      existsSync(this.clipPath('clip-vit-b32-image.onnx')) &&
-      existsSync(this.clipPath('clip-vit-b32-text.onnx')) &&
-      existsSync(this.clipPath('clip-vocab.json')) &&
-      existsSync(this.clipPath('clip-merges.txt'))
+      this.zhReady() ||
+      (existsSync(this.clipPath('clip-vit-b32-image.onnx')) &&
+        existsSync(this.clipPath('clip-vit-b32-text.onnx')) &&
+        existsSync(this.clipPath('clip-vocab.json')) &&
+        existsSync(this.clipPath('clip-merges.txt')))
     )
+  }
+
+  /** 中文 CLIP 就绪(内置 int8 或网络 fp32,任一齐备)——
+      中文跨模态检索质量远高于英文 CLIP */
+  private zhReady(): boolean {
+    return this.zhInt8Ready() || this.zhFp32Ready()
+  }
+
+  private zhInt8Ready(): boolean {
+    return (
+      existsSync(this.zhPath('cn_clip_vision.int8.onnx')) &&
+      existsSync(this.zhPath('cn_clip_text.int8.onnx')) &&
+      existsSync(this.zhPath('vocab.txt'))
+    )
+  }
+
+  private zhFp32Ready(): boolean {
+    return (
+      existsSync(this.zhPath('cn_clip_vision.onnx')) &&
+      existsSync(this.zhPath('cn_clip_text.onnx')) &&
+      existsSync(this.zhPath('vocab.txt'))
+    )
+  }
+
+  private zhPath(name: string): string {
+    return `${getModelsDir()}/clip-zh/${name}`
   }
 
   private clipPath(name: string): string {
@@ -292,6 +326,19 @@ export class LocalImageEmbedder implements ImageEmbedder {
     if (this.imgSession && this.txtSession) return Promise.resolve()
     if (!this.initPromise) {
       this.initPromise = (async () => {
+        if (this.zhReady()) {
+          /* 中文 CLIP ViT-B/16:优先 int8 量化版(约 190MB,实测输出与 fp32
+             余弦 ≥0.97),否则 fp32(约 720MB)。直接传文件路径加载,
+             避免整文件读入内存造成数倍峰值 */
+          const vision = this.zhInt8Ready() ? this.zhPath('cn_clip_vision.int8.onnx') : this.zhPath('cn_clip_vision.onnx')
+          const text = this.zhInt8Ready() ? this.zhPath('cn_clip_text.int8.onnx') : this.zhPath('cn_clip_text.onnx')
+          ;[this.imgSession, this.txtSession] = await Promise.all([
+            ort.InferenceSession.create(vision, ORT_OPTS()),
+            ort.InferenceSession.create(text, ORT_OPTS())
+          ])
+          this.zhTokenizer = new BgeTokenizer(this.zhPath('vocab.txt'))
+          return
+        }
         if (!this.isReady) throw new Error('CLIP 模型未下载（设置 → 模型管理）')
         const [imgBuf, txtBuf] = await Promise.all([
           readFile(this.clipPath('clip-vit-b32-image.onnx')),
@@ -342,9 +389,11 @@ export class LocalImageEmbedder implements ImageEmbedder {
       const merged = new Float32Array(B * 3 * 224 * 224)
       pixels.forEach((px, i) => merged.set(px, i * px.length))
       const tensor = await this.imgMutex.run(async () => {
-        const res = await this.imgSession!.run({
+        /* 按 session 实际输入名喂给(兼容不同导出约定) */
+        const feeds = buildFeeds(this.imgSession!, {
           pixel_values: new ort.Tensor('float32', merged, [B, 3, 224, 224])
         })
+        const res = await this.imgSession!.run(feeds)
         return Object.values(res)[0]
       })
       const dims = tensor.dims
@@ -363,6 +412,34 @@ export class LocalImageEmbedder implements ImageEmbedder {
 
   async embedTextToImageSpace(text: string): Promise<number[]> {
     await this.ensureSessions()
+    if (this.zhTokenizer) {
+      /* 中文 CLIP 文本塔(BERT 系):图为定长 52 静态输入——
+         CLS + 50 token + SEP,不足补 [PAD]=0 且 attention_mask 同步置 0。
+         分词为词表整词 + 逐字回退,中文汉字基本全覆盖;
+         输入名按 session 实际声明匹配(不同导出工具命名有差异) */
+      const L = 52
+      const tok = this.zhTokenizer.encode(text, L)
+      const ids = new BigInt64Array(L) /* 默认 0n = [PAD] */
+      const mask = new BigInt64Array(L)
+      for (let i = 0; i < tok.inputIds.length && i < L; i++) {
+        ids[i] = tok.inputIds[i]
+        mask[i] = 1n
+      }
+      const tensor = await this.txtMutex.run(async () => {
+        const feeds = buildFeeds(
+          this.txtSession!,
+          {
+            input_ids: new ort.Tensor('int64', ids, [1, L]),
+            attention_mask: new ort.Tensor('int64', mask, [1, L]),
+            token_type_ids: new ort.Tensor('int64', new BigInt64Array(L), [1, L])
+          },
+          this.txtSession!.inputNames
+        )
+        const res = await this.txtSession!.run(feeds)
+        return Object.values(res)[0]
+      })
+      return poolToVector(tensor)
+    }
     const tokens = this.clipTokenizer!.encode(text)
     const tensor = await this.txtMutex.run(async () => {
       const res = await this.txtSession!.run({
@@ -372,6 +449,23 @@ export class LocalImageEmbedder implements ImageEmbedder {
     })
     return poolToVector(tensor)
   }
+}
+
+/** 按 session 实际声明的输入名构造 feeds——不同导出工具的输入命名
+    可能有差异;缺项直接明确报错,不静默喂错张量 */
+function buildFeeds(
+  session: ort.InferenceSession,
+  candidates: Record<string, ort.Tensor>,
+  inputNames?: readonly string[]
+): Record<string, ort.Tensor> {
+  const names = inputNames ?? session.inputNames
+  const feeds: Record<string, ort.Tensor> = {}
+  for (const name of names) {
+    const t = candidates[name]
+    if (!t) throw new Error(`ONNX 输入「${name}」不在候选集(input_ids/attention_mask/token_type_ids/pixel_values),请检查模型导出`)
+    feeds[name] = t
+  }
+  return feeds
 }
 
 /**

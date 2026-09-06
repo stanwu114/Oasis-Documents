@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 import { useUiStore } from '../stores/uiStore'
 import { toMediaUrl } from '../lib/media'
+import { platformLabel } from '../../../shared/platform'
 import type { ContentDetail, NoteRow } from '../../../shared/ipc'
 
 /* ================================================================
@@ -17,6 +18,8 @@ export function DetailModal(): React.ReactNode {
   const [data, setData] = useState<ContentDetail | null>(null)
   const [notes, setNotes] = useState<NoteRow[]>([])
   const [sel, setSel] = useState<string>('')
+  const [rev, setRev] = useState(0)
+  const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     if (!detailId) return
@@ -28,13 +31,31 @@ export function DetailModal(): React.ReactNode {
       setData(d as unknown as ContentDetail)
       if (d) setNotes(await window.oasis.notes.list(d.id))
     })()
-  }, [detailId])
+  }, [detailId, rev])
 
   if (!detailId) return null
 
   const isImage = data?.type === 'image'
   const meta = (data?.meta ?? {}) as Record<string, unknown>
   const exif = meta.exif as Record<string, unknown> | undefined
+  /* 收藏图集:本地路径走媒体协议,存量远端 URL 直连(CSP 放行 https) */
+  const gallery = Array.isArray(meta.imageUrls) ? (meta.imageUrls as string[]).filter(Boolean) : []
+  const videoPath = typeof meta.videoPath === 'string' ? meta.videoPath : null
+  const isWebpage = data?.type === 'webpage'
+
+  const onRefresh = async (): Promise<void> => {
+    if (!data) return
+    setRefreshing(true)
+    try {
+      const r = await window.oasis.platform.refresh(data.id)
+      useUiStore.getState().showToast(`已重新抓取:${r.images} 张图${r.video ? ' · 含视频' : ''}`)
+      setRev((x) => x + 1)
+    } catch (e) {
+      useUiStore.getState().showToast(`重新抓取失败:${e instanceof Error ? e.message : e}`, 'error')
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   const addNote = async (): Promise<void> => {
     if (!data || !sel.trim()) return
@@ -56,13 +77,18 @@ export function DetailModal(): React.ReactNode {
           <>
             <div className="detail-title">{data.title || '未命名'}</div>
             <div className="detail-meta-row">
-              {data.platform ? <span className="detail-chip">{data.platform}</span> : null}
+              {data.platform ? <span className="detail-chip">{platformLabel(String(data.platform))}</span> : null}
               {data.mime_type && !isImage ? <span className="detail-chip">{data.ext?.toUpperCase?.() ?? ''}</span> : null}
               <span className="detail-time">{new Date(data.created_at).toLocaleString('zh-CN')}</span>
               <span className="detail-actions">
                 {data.source_path ? (
                   <button type="button" className="link-btn" onClick={() => window.oasis.files.reveal(data.source_path as string)}>
                     打开位置
+                  </button>
+                ) : null}
+                {isWebpage ? (
+                  <button type="button" className="link-btn" disabled={refreshing} onClick={() => void onRefresh()}>
+                    {refreshing ? '抓取中…' : '重新抓取图文'}
                   </button>
                 ) : null}
                 {data.url ? (
@@ -98,6 +124,28 @@ export function DetailModal(): React.ReactNode {
               </div>
             ) : (
               <div className="detail-body">
+                {/* 收藏图集:图在上,文在下;视频笔记内嵌播放 */}
+                {videoPath ? (
+                  <div className="reading-gallery">
+                    <video controls preload="metadata" src={toMediaUrl(videoPath) ?? undefined} />
+                  </div>
+                ) : null}
+                {gallery.length > 0 ? (
+                  <div className="reading-gallery">
+                    {gallery.map((img, i) => (
+                      <img
+                        key={i}
+                        src={/^https?:/.test(img) ? img : (toMediaUrl(img) ?? undefined)}
+                        alt={`${data.title} · ${i + 1}`}
+                        loading="lazy"
+                      />
+                    ))}
+                  </div>
+                ) : isWebpage ? (
+                  <div className="detail-hint" style={{ marginBottom: 8 }}>
+                    这条收藏没有本地图片——点右上角「重新抓取图文」补齐图集
+                  </div>
+                ) : null}
                 <div
                   className="reading-body"
                   onMouseUp={() => setSel(window.getSelection()?.toString() ?? '')}

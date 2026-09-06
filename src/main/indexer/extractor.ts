@@ -139,17 +139,34 @@ async function extractVideo(
   return result
 }
 
-/* ---- PDF：pdf-parse 动态加载（缺依赖时降级为占位） ---- */
+/* ---- PDF：unpdf（完整 pdf.js，容错非标准 XRef）；
+   扫描件（无文本层）渲染首页走 Vision OCR ---- */
 async function extractPdf(path: string, size: number): Promise<Omit<ExtractResult, 'category'>> {
   try {
-    const mod = await import('pdf-parse')
-    const buf = await readFile(path)
-    const parsed = await mod.default(buf)
+    const { extractText, getDocumentProxy } = await import('unpdf')
+    const { readFile } = await import('node:fs/promises')
+    const buf = new Uint8Array(await readFile(path))
+    const pdf = await getDocumentProxy(buf)
+    const { text, totalPages } = await extractText(pdf, { mergePages: true })
+    const fullText = String(text ?? '').trim()
+
+    if (fullText.length >= 20) {
+      return {
+        mimeType: 'application/pdf',
+        fileSize: size,
+        text: fullText,
+        meta: { pages: totalPages },
+        thumbnailPath: null
+      }
+    }
+
+    /* 扫描件：文本层缺失 → 渲染首页 OCR（qlmanage 系统自带） */
+    const ocrText = await ocrPdfFirstPage(path)
     return {
       mimeType: 'application/pdf',
       fileSize: size,
-      text: parsed.text,
-      meta: { pages: parsed.numpages },
+      text: ocrText,
+      meta: { pages: totalPages, scanned: true, ocrPages: ocrText ? 1 : 0 },
       thumbnailPath: null
     }
   } catch (err) {
@@ -157,14 +174,59 @@ async function extractPdf(path: string, size: number): Promise<Omit<ExtractResul
   }
 }
 
-/* ---- Word: mammoth 动态加载 ---- */
+/** 扫描 PDF 首页 → qlmanage 渲染 PNG → Vision OCR */
+async function ocrPdfFirstPage(path: string): Promise<string> {
+  if (process.platform !== 'darwin') return ''
+  try {
+    const { execFile } = await import('node:child_process')
+    const { mkdtemp, readdir } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'pdf-ocr-'))
+    await new Promise<void>((resolve, reject) => {
+      execFile('qlmanage', ['-t', '-s', '1600', '-o', dir, path], { timeout: 20000 }, (e) => (e ? reject(e) : resolve()))
+    })
+    const files = await readdir(dir)
+    const png = files.find((f) => f.endsWith('.png'))
+    if (!png) return ''
+    const { ocrImage } = await import('../ocr')
+    const text = await ocrImage(join(dir, png))
+    const { rm } = await import('node:fs/promises')
+    void rm(dir, { recursive: true, force: true }).catch(() => {})
+    return text
+  } catch {
+    return ''
+  }
+}
+
+/* ---- Word: mammoth 优先；失败（WPS 等非标 docx）→ unzip 剥 XML 兜底 ---- */
 async function extractDocx(path: string, size: number): Promise<Omit<ExtractResult, 'category'>> {
   try {
     const mod = (await import('mammoth')) as { extractRawText: (o: { path: string }) => Promise<{ value: string }> }
     const { value } = await mod.extractRawText({ path })
     return { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileSize: size, text: value, meta: {}, thumbnailPath: null }
-  } catch (err) {
-    return degraded('application/octet-stream', size, err)
+  } catch {
+    /* 兜底：docx 是 zip 容器，unzip 取 word/document.xml 剥标签（系统自带，零依赖） */
+    try {
+      const { execFile } = await import('node:child_process')
+      const xml = await new Promise<string>((resolve, reject) => {
+        execFile('unzip', ['-p', path, 'word/document.xml'], { timeout: 15000, maxBuffer: 16 * 1024 * 1024 }, (e, out) =>
+          e ? reject(e) : resolve(String(out))
+        )
+      })
+      const text = xml
+        .replace(/<w:p[^>]*>/g, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
+      if (text.length > 0) {
+        return { mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', fileSize: size, text, meta: { extractor: 'unzip-fallback' }, thumbnailPath: null }
+      }
+      throw new Error('unzip 兜底也未提取到文本')
+    } catch (err) {
+      return degraded('application/octet-stream', size, err)
+    }
   }
 }
 

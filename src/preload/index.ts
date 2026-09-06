@@ -67,16 +67,19 @@ const api: OasisAPI = {
     importLink: (url) => ipcRenderer.invoke('platform:importLink', url),
     listPlugins: () => ipcRenderer.invoke('platform:listPlugins'),
     listContents: () => ipcRenderer.invoke('platform:listContents'),
+    remove: (id) => ipcRenderer.invoke('platform:remove', id),
+    refresh: (id) => ipcRenderer.invoke('platform:refresh', id),
+    mediaParser: {
+      get: () => ipcRenderer.invoke('mediaParser:get'),
+      set: (conf) => ipcRenderer.invoke('mediaParser:set', conf),
+      test: (base) => ipcRenderer.invoke('mediaParser:test', base),
+      builtin: {
+        status: () => ipcRenderer.invoke('mediaParser:builtinStatus'),
+        enable: () => ipcRenderer.invoke('mediaParser:builtinEnable'),
+        disable: () => ipcRenderer.invoke('mediaParser:builtinDisable')
+      }
+    },
     retag: () => ipcRenderer.invoke('platform:retag')
-  },
-  subs: {
-    add: (url) => ipcRenderer.invoke('subs:add', url),
-    list: () => ipcRenderer.invoke('subs:list'),
-    remove: (id) => ipcRenderer.invoke('subs:remove', id),
-    refresh: (id) => ipcRenderer.invoke('subs:refresh', id),
-    items: (opts) => ipcRenderer.invoke('subs:items', opts),
-    markRead: (itemId, read) => ipcRenderer.invoke('subs:markRead', itemId, read),
-    star: (itemId, starred) => ipcRenderer.invoke('subs:star', itemId, starred)
   },
   notes: {
     list: (contentId) => ipcRenderer.invoke('notes:list', contentId),
@@ -84,30 +87,13 @@ const api: OasisAPI = {
     update: (id, note) => ipcRenderer.invoke('notes:update', id, note),
     remove: (id) => ipcRenderer.invoke('notes:remove', id)
   },
-  io: {
-    importBookmarks: (html) => ipcRenderer.invoke('io:importBookmarks', html),
-    importOpml: (xml) => ipcRenderer.invoke('io:importOpml', xml),
-    importJson: (json) => ipcRenderer.invoke('io:importJson', json),
-    exportJson: () => ipcRenderer.invoke('io:exportJson'),
-    pickOpenFile: (extensions) => ipcRenderer.invoke('io:pickOpenFile', extensions),
-    pickSaveFile: (defaultName) => ipcRenderer.invoke('io:pickSaveFile', defaultName),
-    readFile: (path) => ipcRenderer.invoke('io:readFile', path),
-    writeFile: (path, content) => ipcRenderer.invoke('io:writeFile', path, content)
-  },
-  newsletter: {
-    conf: () => ipcRenderer.invoke('newsletter:conf'),
-    save: (input) => ipcRenderer.invoke('newsletter:save', input),
-    sync: () => ipcRenderer.invoke('newsletter:sync')
-  },
-  accounts: {
-    list: () => ipcRenderer.invoke('accounts:list'),
-    login: (id) => ipcRenderer.invoke('accounts:login', id),
-    subscribeMp: (name, base) => ipcRenderer.invoke('accounts:subscribeMp', name, base)
-  },
-  diag: {
-    indexStats: () => ipcRenderer.invoke('diag:indexStats')
-  },
   importStatus: () => ipcRenderer.invoke('import:status'),
+  status: {
+    overview: () => ipcRenderer.invoke('status:overview')
+  },
+  llm: {
+    testProvider: (input) => ipcRenderer.invoke('llm:testProvider', input)
+  },
   models: {
     status: () => ipcRenderer.invoke('models:status'),
     download: (name) => ipcRenderer.invoke('models:download', name)

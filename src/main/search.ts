@@ -1,192 +1,183 @@
 import { getDb } from './db'
 import { ftsSearch } from './fts'
-import { getEmbedders, embedderReadiness, embedTextsSafe, embedImages, embedTextToImageSpace } from './embedder'
+import { getEmbedders, embedderReadiness, embedQuerySafe, embedImages, embedTextToImageSpace } from './embedder'
+import { searchVectors } from './lancedb'
+import {
+  cosFromDistance,
+  applyFloors,
+  keywordScore,
+  mergeById,
+  type ScoredHit
+} from './search-scoring'
+import { tokenizeQuery, makeQuerySnippet } from '../shared/highlight'
 import type { SearchResult } from '../shared/ipc'
 
 /* ================================================================
-   检索引擎 — 三路检索统一入口
-   以文搜文: 查询 → 文本嵌入 → content_vectors (语义空间)
-   以文搜图: 查询 → CLIP 文本编码 → image_vectors (CLIP 空间)
-   以图搜图: 图片 → CLIP 图片编码 → image_vectors
-   辅以 SQLite 关键词 LIKE（向量库不可用时的兜底 + 混合召回）
+   检索引擎 — 三模式对象严格分离
+   以文搜文: 查询 → BGE(带检索指令) → content_vectors + 关键词(FTS/LIKE)
+             —— 搜索对象仅文档(content_type 收窄,图片/收藏/RSS 不掺入)
+   以文搜图: 查询 → CLIP 文本编码 → image_vectors + 文件名/OCR 关键词(仅图片)
+   以图搜图: 图片 → CLIP 图片编码 → image_vectors(仅图片)
+   质量策略（N20）:
+   - 距离 → 余弦相似度,展示不再失真
+   - 绝对底线 + 相对头部窗口:弱命中宁可不给,不凑满名额
+   - 过量取回(3×)后按存在性水合:孤儿向量不再挤占结果名额
+   - 标题关键词命中加权,可与语义命中竞争
    ================================================================ */
 
-interface RawHit {
-  id: string
-  score: number
-}
+/* 相关性阈值(余弦标度)。语义通道好命中约 0.5–0.75;
+   CLIP 中英跨模态相似度整体偏低,阈值相应降低。
+   若召回偏少/偏杂,调这里(可用 scripts/eval-retrieval.mjs 验证) */
+const TEXT_SEMANTIC_FLOOR = 0.3
+const CLIP_TEXT_FLOOR = 0.16
+const CLIP_SIM_FLOOR = 0.45 /* 以图搜图:同空间相似度高,门槛可抬高 */
+const REL_WINDOW = 0.3
 
 export async function searchByText(
   query: string,
-  opts?: { limit?: number; type?: 'all' | 'image' | 'file' | 'webpage' }
+  opts?: { limit?: number; type?: 'all' | 'document' }
 ): Promise<SearchResult[]> {
   const limit = opts?.limit ?? 20
+  /* 以文搜文:默认仅文档——图片归以文搜图/以图搜图,收藏/RSS 不掺入 */
+  const type = opts?.type ?? 'document'
   if (!query.trim()) return []
+  const fetchN = limit * 3 /* 过量取回,水合时吸收孤儿向量与类型过滤损耗 */
 
-  /* 1) 语义向量路 */
-  const semantic = await semanticTextSearch(query, limit).catch((e) => {
-    console.warn('[search] 语义检索不可用，回退关键词:', e instanceof Error ? e.message : e)
-    return [] as RawHit[]
-  })
+  /* 双通道并行召回:文本语义(按 content_type 收窄候选) + 关键词(FTS/LIKE) */
+  const [semHits, kwHits] = await Promise.all([
+    semanticTextHits(
+      query,
+      fetchN,
+      type === 'document' ? `content_type = 'document' OR content_type IS NULL` : undefined
+    ).catch((e) => {
+      console.warn('[search] 语义检索不可用:', e instanceof Error ? e.message : e)
+      return [] as ScoredHit[]
+    }),
+    Promise.resolve(keywordHits(query, limit * 2, type === 'document' ? 'document' : undefined))
+  ])
 
-  /* 2) 关键词路（标题/正文/OCR） */
-  const keyword = keywordSearch(query, limit)
-
-  /* 3) 合并去重：语义优先，关键词补位，加权融合 */
-  const merged = mergeHits([semantic, keyword], limit)
-  return hydrate(merged, opts?.type)
+  return hydrate(mergeById([semHits, kwHits]), type, query).slice(0, limit)
 }
 
 export async function searchImagesByText(query: string, limit = 20): Promise<SearchResult[]> {
   if (!query.trim()) return []
-  let hits: RawHit[] = []
-  try {
-    const qvec = await embedTextToImageSpace(query)
-    hits = await queryLanceByContentIds('image_vectors', qvec, limit)
-  } catch (e) {
-    console.warn('[search] CLIP 文本编码不可用，回退 OCR 关键词:', e instanceof Error ? e.message : e)
-    hits = keywordSearch(query, limit, 'image')
-  }
-  return hydrate(hits, 'image')
+  /* N20:CLIP 通道 + 文件名/OCR 关键词通道并行——
+     "架构图" 要能命中 "系统架构图.png",光靠 CLIP 中文跨模态不够 */
+  const [clip, kw] = await Promise.all([
+    clipTextHits(query, limit * 3).catch(() => [] as ScoredHit[]),
+    Promise.resolve(keywordHits(query, limit * 2, 'image'))
+  ])
+  return hydrate(mergeById([clip, kw]), 'image', query).slice(0, limit)
 }
 
 export async function searchByImage(imagePath: string, limit = 20): Promise<SearchResult[]> {
-  let hits: RawHit[] = []
   const qvec = await embedImages([imagePath])
-  hits = await queryLanceByContentIds('image_vectors', qvec[0], limit)
-  return hydrate(hits, 'image')
+  const rows = await searchVectors('image_vectors', qvec[0], limit * 3)
+  const hits = applyFloors(
+    rows.map((r) => ({ id: r.contentId, score: cosFromDistance(r.distance) })),
+    CLIP_SIM_FLOOR,
+    REL_WINDOW
+  )
+  return hydrate(hits, 'image').slice(0, limit)
 }
 
 /* ---- 内部 ---- */
 
-async function semanticTextSearch(query: string, limit: number): Promise<RawHit[]> {
-  const { vectors } = await embedTextsSafe([query])
-  return queryLanceByContentIds('content_vectors', vectors[0], limit)
+async function semanticTextHits(query: string, fetchN: number, where?: string): Promise<ScoredHit[]> {
+  const { vectors } = await embedQuerySafe(query)
+  const rows = await searchVectors('content_vectors', vectors[0], fetchN, where)
+  return applyFloors(
+    rows.map((r) => ({ id: r.contentId, score: cosFromDistance(r.distance) })),
+    TEXT_SEMANTIC_FLOOR,
+    REL_WINDOW
+  )
 }
 
-/** LanceDB 向量检索 → content_id + score */
-async function queryLanceByContentIds(
-  table: 'image_vectors' | 'content_vectors',
-  vector: number[],
-  limit: number
-): Promise<RawHit[]> {
-  const { searchVectors } = await import('./lancedb')
-  const rows = await searchVectors(table, vector, limit)
-  return rows.map((r) => ({ id: r.contentId, score: r.score }))
+async function clipTextHits(query: string, fetchN: number): Promise<ScoredHit[]> {
+  const qvec = await embedTextToImageSpace(query)
+  const rows = await searchVectors('image_vectors', qvec, fetchN)
+  return applyFloors(
+    rows.map((r) => ({ id: r.contentId, score: cosFromDistance(r.distance) })),
+    CLIP_TEXT_FLOOR,
+    REL_WINDOW
+  )
 }
 
-/** 关键词路：FTS5 全文检索（中文 bigram）优先，回退 LIKE；
- *  覆盖本地内容 + 收藏；RSS 条目（标题/摘要）进入统一搜索 */
-function keywordSearch(query: string, limit: number, type?: 'image' | 'file' | 'webpage'): RawHit[] {
+/**
+ * 关键词通道:FTS5(不可用回退 LIKE)→ 标题命中加权打分。
+ * FTS 里的孤儿行(内容已删但索引未清)在此按存在性自然过滤。
+ */
+function keywordHits(query: string, limit: number, type?: 'image' | 'file' | 'webpage' | 'document'): ScoredHit[] {
   const db = getDb()
+  const q = query.trim().toLowerCase()
 
-  const ids: string[] = []
-
-  /* 通道 1：FTS5（不可用返回 null 回退） */
   const ftsIds = ftsSearch(query, limit * 2)
+  let ids: string[]
   if (ftsIds) {
-    ids.push(...ftsIds)
+    ids = ftsIds
   } else {
-    /* 回退：LIKE */
     const like = `%${query.replace(/[%_]/g, '')}%`
-    ids.push(
-      ...(
-        db
-          .prepare(`SELECT id FROM contents WHERE (title LIKE ? OR content LIKE ? OR ocr_text LIKE ?) LIMIT ?`)
-          .all(like, like, like, limit * 2) as { id: string }[]
-      ).map((r) => r.id)
-    )
+    ids = (
+      db
+        .prepare(`SELECT id FROM contents WHERE (title LIKE ? OR content LIKE ? OR ocr_text LIKE ?) LIMIT ?`)
+        .all(like, like, like, limit * 2) as { id: string }[]
+    ).map((r) => r.id)
   }
 
-  /* 按类型过滤 + 去重保序 */
-  const typeStmt = type
-    ? db.prepare(`SELECT type FROM contents WHERE id = ?`)
-    : null
+  const rowStmt = db.prepare(`SELECT title, type FROM contents WHERE id = ?`)
   const seen = new Set<string>()
-  const filtered: string[] = []
+  const hits: { id: string; titleHit: boolean }[] = []
+
   for (const id of ids) {
     if (seen.has(id)) continue
     seen.add(id)
-    if (typeStmt) {
-      const row = typeStmt.get(id) as { type: string } | undefined
-      if (!row || row.type !== type) continue
-    }
-    filtered.push(id)
-    if (filtered.length >= limit) break
+    const row = rowStmt.get(id) as { title: string; type: string } | undefined
+    if (!row) continue /* FTS 孤儿行 */
+    if (type && row.type !== type) continue
+    hits.push({ id, titleHit: row.title.toLowerCase().includes(q) })
   }
 
-  /* R20：RSS 条目（标题/摘要）进入统一搜索 */
-  const like = `%${query.replace(/[%_]/g, '')}%`
-  const feedRows = db
-    .prepare(
-      `SELECT 'feed:' || id AS id FROM feed_items
-       WHERE title LIKE ? OR summary LIKE ?
-       ORDER BY published_at DESC LIMIT ?`
-    )
-    .all(like, like, Math.min(limit, 20)) as { id: string }[]
 
-  const all: string[] = [...filtered, ...feedRows.map((r) => r.id)]
-  return all.map((id, i) => ({ id, score: Math.max(0, Math.min(1, 1 - i / (limit * 2))) })) /* 线性衰减分，钳制 0–1 */
+  /* 标题命中优先排序(同组内保持 FTS 位次),再统一计位次衰减——
+     否则标题命中可能因 FTS 排位靠后被衰减到强语义命中之下 */
+  const ordered = [...hits.filter((h) => h.titleHit), ...hits.filter((h) => !h.titleHit)]
+  return ordered.map((h, i) => ({ id: h.id, score: keywordScore(i, ordered.length, h.titleHit) })).slice(0, limit)
 }
 
-/** 多路命中合并：R21——同一内容的多切片命中聚合为一条结果
- *  （取最高分，不按切片数重复加分）；分数钳制 [0,1] 防负数/超百 */
-function mergeHits(paths: RawHit[][], limit: number): RawHit[] {
-  const combined = new Map<string, { id: string; score: number }>()
-  for (const hits of paths) {
-    for (const h of hits) {
-      const prev = combined.get(h.id)
-      if (prev) {
-        prev.score = Math.max(prev.score, h.score) /* 同内容取最高，不叠加 */
-      } else {
-        combined.set(h.id, { id: h.id, score: h.score })
-      }
-    }
-  }
-  return [...combined.values()]
-    .map((h) => ({ ...h, score: Math.max(0, Math.min(1, h.score)) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-}
-
-/** content_id → SearchResult（标题、摘要、来源） */
-function hydrate(hits: RawHit[], type?: 'all' | 'image' | 'file' | 'webpage'): SearchResult[] {
+/** content_id → SearchResult（标题、摘要、来源、缩略图;不存在的内容自然过滤）。
+ *  query 用于摘要定位:窗口围绕命中词元截取(Everything 式,命中处可见) */
+function hydrate(
+  hits: ScoredHit[],
+  type?: 'all' | 'image' | 'file' | 'webpage' | 'document',
+  query?: string
+): SearchResult[] {
   if (hits.length === 0) return []
+  const tokens = query ? tokenizeQuery(query) : []
   const db = getDb()
-  const stmt = db.prepare(`SELECT id, type, title, content, source_path, thumbnail_path, url, ocr_text, created_at FROM contents WHERE id = ?`)
-  /* R20：feed: 前缀命中来自订阅条目 */
-  const feedStmt = db.prepare(
-    `SELECT f.id, f.title, f.summary AS content, f.url, s.title AS sub_title, f.published_at AS created_at
-     FROM feed_items f JOIN subscriptions s ON s.id = f.subscription_id WHERE f.id = ?`
+  const stmt = db.prepare(
+    `SELECT id, type, title, content, source_path, thumbnail_path, url, ocr_text, created_at FROM contents WHERE id = ?`
   )
   const out: SearchResult[] = []
   for (const h of hits) {
-    if (h.id.startsWith('feed:')) {
-      const feed = feedStmt.get(h.id.slice(5)) as
-        | { id: string; title: string; content: string; url: string; sub_title: string; created_at: number }
-        | undefined
-      if (feed) {
-        out.push({
-          id: `feed:${feed.id}`,
-          title: feed.title,
-          snippet: makeSnippet(`${feed.sub_title} · ${feed.content}`),
-          type: 'webpage',
-          url: feed.url,
-          score: Number(h.score.toFixed(4)),
-          createdAt: feed.created_at
-        })
-      }
-      continue
-    }
     const row = stmt.get(h.id) as
-      | { id: string; type: string; title: string; content: string; source_path: string | null; thumbnail_path: string | null; url: string | null; ocr_text: string; created_at: number }
+      | {
+          id: string
+          type: string
+          title: string
+          content: string
+          source_path: string | null
+          thumbnail_path: string | null
+          url: string | null
+          ocr_text: string
+          created_at: number
+        }
       | undefined
-    if (!row) continue
+    if (!row) continue /* 孤儿向量/已删内容 */
     if (type && type !== 'all' && row.type !== type) continue
     out.push({
       id: row.id,
       title: row.title || (row.source_path?.split('/').pop() ?? '未命名'),
-      snippet: makeSnippet(row.content || row.ocr_text),
+      snippet: makeQuerySnippet(row.content || row.ocr_text, tokens),
       type: row.type as SearchResult['type'],
       sourcePath: row.source_path ?? undefined,
       thumbnailPath: row.thumbnail_path ?? undefined,
@@ -196,11 +187,6 @@ function hydrate(hits: RawHit[], type?: 'all' | 'image' | 'file' | 'webpage'): S
     })
   }
   return out
-}
-
-function makeSnippet(text: string, len = 120): string {
-  const clean = text.replace(/\s+/g, ' ').trim()
-  return clean.length > len ? clean.slice(0, len) + '…' : clean
 }
 
 /* 检查嵌入引擎就绪状态（N12：真实状态而非硬编码） */

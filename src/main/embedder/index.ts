@@ -39,12 +39,42 @@ export async function embedTextsSafe(texts: string[]): Promise<{ vectors: number
   }
 }
 
+/* BGE 官方检索协议：查询侧加指令前缀、文档侧不加（v1.5 中文检索标准用法）。
+   不加指令时查询与文档的表示分布有偏，召回质量明显下降 */
+const BGE_QUERY_INSTRUCTION = '为这个句子生成表示以用于检索相关文章:'
+
+/** 检索查询专用嵌入：本地 BGE 自动附加查询指令；在线 API 不加（各家协议不同） */
+export async function embedQuerySafe(query: string): Promise<{ vectors: number[][]; usedProvider: string }> {
+  const e = ensure()
+  const withInstruction = (emb: TextEmbedder): string[] => [
+    emb instanceof LocalTextEmbedder ? `${BGE_QUERY_INSTRUCTION}${query}` : query
+  ]
+  try {
+    const vectors = await e.text.embedTexts(withInstruction(e.text))
+    return { vectors, usedProvider: e.text.info.name }
+  } catch (err) {
+    if (e.textFallback && e.textFallback !== e.text) {
+      console.warn('[embedder] 在线查询嵌入失败，降级本地:', err instanceof Error ? err.message : err)
+      const vectors = await e.textFallback.embedTexts(withInstruction(e.textFallback))
+      return { vectors, usedProvider: `${e.textFallback.info.name} (fallback)` }
+    }
+    throw err
+  }
+}
+
 export function embedImages(imagePaths: string[]): Promise<number[][]> {
   return ensure().image.embedImages(imagePaths)
 }
 
 export function embedTextToImageSpace(text: string): Promise<number[]> {
   return ensure().image.embedTextToImageSpace(text)
+}
+
+/** 当前图片向量空间身份(中英 CLIP 同为 512 维但空间不兼容,
+    LanceDB 写入前据此校验,切换时 drop 重建并全量重嵌) */
+export function activeImageVectorSpace(): string {
+  const img = ensure().image
+  return img instanceof LocalImageEmbedder ? img.space : 'image-space-unknown'
 }
 
 export function invalidateEmbedderCache(): void {
@@ -62,6 +92,11 @@ export function embedderReadiness(): { textReady: boolean; imageReady: boolean }
     textReady: online || (local instanceof LocalTextEmbedder ? local.isReady : false),
     imageReady: e.image instanceof LocalImageEmbedder ? e.image.isReady : false
   }
+}
+
+/** 读取嵌入配置(含凭据还原);状态页等外部模块共用 */
+export function loadEmbeddingSettings(): EmbeddingSettings {
+  return loadSettings()
 }
 
 function loadSettings(): EmbeddingSettings {

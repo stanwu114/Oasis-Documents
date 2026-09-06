@@ -15,20 +15,20 @@ import {
 } from './organizer/executor'
 import { addWatch, removeWatch } from './indexer/watcher'
 import { reindexPending, embeddingQueueSize } from './indexer/embedding-pipeline'
-import { getNewsletterConf, saveNewsletterConf, syncNewsletter } from './newsletter'
-import { openPlatformLogin, subscribeWechatMp, accountActivity } from './platforms/accounts'
 import { autoTagSmart, mergeTags } from './autotag'
 import { classifyExt } from '../shared/classify'
 import { isUnderRoot } from './path-boundary'
+import { testProviderConnection } from './llm-providers'
+import { getMediaParserConf, saveMediaParserConf, testMediaParser } from './platforms/external'
+import { xhsSidecarStatus, enableBuiltinXhs, stopXhsSidecar, setBuiltinXhs } from './platforms/xhs-sidecar'
+import { buildSystemStatus } from './status'
 import { getImportProgress } from './import-progress'
 import { persistEmbeddingSettings, hydrateEmbeddingSettings } from './credentials'
-import * as ioModule from './io'
 import { videoSidecar } from './video/sidecar'
 import { searchByText, searchImagesByText, searchByImage, embedderStatus } from './search'
-import { invalidateEmbedderCache, embedderReadiness } from './embedder'
+import { invalidateEmbedderCache } from './embedder'
 import { modelStatuses, downloadModel } from './models/manager'
 import { importLink, listPlugins } from './platforms'
-import { addSubscription, refreshSubscription, refreshAll } from './subscriptions/rss'
 import type { EmbeddingSettings, FileIndexStatus } from '../shared/ipc'
 
 /* ================================================================
@@ -42,13 +42,11 @@ export function registerIpc(): void {
   registerSearchIpc()
   registerModelIpc()
   registerPlatformIpc()
-  registerSubsIpc()
   registerImportIpc()
   registerNotesIpc()
-  registerIoIpc()
-  registerDiagnosticsIpc()
-  registerNewsletterIpc()
   registerVideoIpc()
+  registerStatusIpc()
+  registerLlmIpc()
 }
 
 function win(): BrowserWindow | null {
@@ -189,7 +187,7 @@ function registerFilesIpc(): void {
       totalFiles: row.total,
       indexedFiles: indexed.n,
       pendingFiles: pending.n,
-      isScanning: getImportProgress().phase === 'indexing',
+      isScanning: getImportProgress().phase === 'indexing' || getImportProgress().phase === 'embedding',
       lastScanAt: null
     }
   })
@@ -312,32 +310,9 @@ function registerFilesIpc(): void {
     }
   })
 
-  ipcMain.handle('files:getReading', (_e, id: string) => {
-    const db = getDb()
-    /* feed: 前缀 → 订阅条目阅读详情 */
-    if (id.startsWith('feed:')) {
-      const row = db
-        .prepare(
-          `SELECT f.id AS fid, f.title, f.summary AS content, f.url, f.published_at, s.title AS sub_title
-           FROM feed_items f JOIN subscriptions s ON s.id = f.subscription_id WHERE f.id = ?`
-        )
-        .get(id.slice(5)) as
-        | { fid: string; title: string; content: string; url: string; published_at: number; sub_title: string }
-        | undefined
-      if (!row) return null
-      return {
-        id,
-        type: 'webpage',
-        title: row.title,
-        content: row.content,
-        url: row.url,
-        platform: `rss:${row.sub_title}`,
-        tags: [],
-        created_at: row.published_at,
-        content_id: row.fid
-      }
-    }
-    return null /* 普通收藏直接走 getDetail */
+  ipcMain.handle('files:getReading', () => {
+    /* 订阅模块已移除:普通收藏直接走 getDetail */
+    return null
   })
 
   ipcMain.handle('files:reveal', (_e, path: string) => {
@@ -347,7 +322,7 @@ function registerFilesIpc(): void {
   ipcMain.handle('files:list', async (_e, _dir?: string, opts?: { offset?: number; limit?: number; dir?: string; category?: string }) => {
     const db = getDb()
     const offset = Math.max(0, opts?.offset ?? 0)
-    const limit = Math.min(Math.max(opts?.limit ?? 500, 1), 2000)
+    const limit = Math.min(Math.max(opts?.limit ?? 500, 1), 10000) /* 一次性全量展示 */
 
     /* R22：目录/分类在 SQL 里先过滤再分页——前端过滤分页数据会产生假空列表 */
     /* 两套过滤范围：
@@ -426,8 +401,11 @@ function registerFilesIpc(): void {
 
 /* ---- 检索 ---- */
 function registerSearchIpc(): void {
-  ipcMain.handle('search:query', (_e, text: string, opts?: { limit?: number; filters?: string[] }) =>
-    searchByText(text, { limit: opts?.limit, type: 'all' })
+  /* 以文搜文:搜索对象仅文档(缺省 'document',传 'all' 可显式全量) */
+  ipcMain.handle(
+    'search:query',
+    (_e, text: string, opts?: { limit?: number; filters?: string[]; type?: 'all' | 'document' }) =>
+      searchByText(text, { limit: opts?.limit, type: opts?.type ?? 'document' })
   )
 
   ipcMain.handle('search:queryImage', (_e, imagePath: string, opts?: { limit?: number }) =>
@@ -460,58 +438,25 @@ function registerSearchIpc(): void {
   })
 }
 
+/* ---- 系统状态页 ---- */
+function registerStatusIpc(): void {
+  ipcMain.handle('status:overview', () => buildSystemStatus())
+}
+
+/* ---- 在线模型服务商接入:测试连通 + 拉取模型列表 ---- */
+function registerLlmIpc(): void {
+  ipcMain.handle('llm:testProvider', (_e, input: { provider: 'bailian' | 'zhipu' | 'custom'; apiKey: string; baseUrl?: string }) =>
+    testProviderConnection(input)
+  )
+}
+
 /* ---- 导入进度（事件推送 + 轮询双通道，UI 收敛不依赖单点） ---- */
 function registerImportIpc(): void {
   ipcMain.handle('import:status', () => getImportProgress())
 }
 
 /* ---- Newsletter / L3 平台账号 ---- */
-function registerNewsletterIpc(): void {
-  ipcMain.handle('newsletter:conf', () => getNewsletterConf())
-  ipcMain.handle('newsletter:save', (_e, input: Parameters<typeof saveNewsletterConf>[0]) => saveNewsletterConf(input))
-  ipcMain.handle('newsletter:sync', async () => syncNewsletter())
-
-  ipcMain.handle('accounts:list', () => accountActivity())
-  ipcMain.handle('accounts:login', (_e, id: string) => openPlatformLogin(id))
-  ipcMain.handle('accounts:subscribeMp', (_e, name: string, rsshubBase?: string) => subscribeWechatMp(name, rsshubBase))
-}
-
 /* ---- 12.2：索引状态诊断 ---- */
-function registerDiagnosticsIpc(): void {
-  ipcMain.handle('diag:indexStats', () => {
-    const db = getDb()
-    const ready = embedderReadiness()
-    const pending = (db.prepare(`SELECT COUNT(*) AS n FROM contents WHERE needs_reindex = 1`).get() as { n: number }).n
-    const indexed = (db.prepare(`SELECT COUNT(*) AS n FROM contents WHERE indexed_at IS NOT NULL`).get() as { n: number }).n
-    const byType = db
-      .prepare(`SELECT type, COUNT(*) AS n FROM contents GROUP BY type`)
-      .all() as { type: string; n: number }[]
-    const ftsRows = (() => {
-      try {
-        return (db.prepare(`SELECT COUNT(*) AS n FROM contents_fts`).get() as { n: number }).n
-      } catch {
-        return -1 /* FTS 不可用 */
-      }
-    })()
-    const recentErrors = db
-      .prepare(
-        `SELECT json_extract(meta, '$.embedError') AS err, COUNT(*) AS n
-         FROM contents WHERE json_extract(meta, '$.embedError') IS NOT NULL
-         GROUP BY err ORDER BY n DESC LIMIT 10`
-      )
-      .all() as { err: string; n: number }[]
-    return {
-      pending,
-      indexed,
-      byType: Object.fromEntries(byType.map((r) => [r.type, r.n])),
-      queueSize: embeddingQueueSize(),
-      ftsRows,
-      recentErrors,
-      model: { textReady: ready.textReady, imageReady: ready.imageReady }
-    }
-  })
-}
-
 /* ---- 视频检索（SentrySearch sidecar） ---- */
 function registerVideoIpc(): void {
   ipcMain.handle('video:init', async (_e, params: { backend: 'qwen-cloud' | 'gemini' | 'local'; apiKey?: string; model?: string }) => {
@@ -540,6 +485,11 @@ function registerModelIpc(): void {
     await downloadModel(name, (s) => sender?.webContents.send('model:progress', s))
     /* 模型就位后立即补扫历史待嵌入内容（无需重启应用） */
     invalidateEmbedderCache()
+    if (name === 'clip-zh') {
+      /* 中文 CLIP 就位:图片向量空间即将切换(旧英文向量不兼容),
+         全部图片标记待重嵌——写入路径 ensureVectorSpace 会 drop 旧表 */
+      getDb().prepare(`UPDATE contents SET needs_reindex = 1 WHERE type = 'image'`).run()
+    }
     const queued = reindexPending()
     if (queued > 0) console.log(`[embed-pipeline] 模型就绪，补扫 ${queued} 条`)
   })
@@ -568,7 +518,49 @@ function registerPlatformIpc(): void {
     }))
   })
 
+  /* 删除收藏(仅 webpage 类型):SQLite 行 + 笔记 + FTS + 两张向量表级联清理,
+     本地缩略图文件一并删除(仍被其他收藏引用时保留) */
+  ipcMain.handle('platform:remove', async (_e, id: string): Promise<{ removed: boolean }> => {
+    const db = getDb()
+    const row = db
+      .prepare(`SELECT id, thumbnail_path FROM contents WHERE id = ? AND type = 'webpage'`)
+      .get(id) as { id: string; thumbnail_path: string | null } | undefined
+    if (!row) return { removed: false }
+
+    const { deleteContentCascade } = await import('./indexer/pipeline')
+    deleteContentCascade(id)
+
+    if (row.thumbnail_path) {
+      /* 缩略图按图片 URL 哈希命名,多条收藏共用同一图时不删文件 */
+      const shared = (
+        db.prepare(`SELECT COUNT(*) AS n FROM contents WHERE thumbnail_path = ?`).get(row.thumbnail_path) as { n: number }
+      ).n
+      if (shared === 0) {
+        const { unlink } = await import('node:fs/promises')
+        void unlink(row.thumbnail_path).catch(() => {})
+      }
+    }
+    return { removed: true }
+  })
+
   /* 存量内容补打 AI 标签（在线文本模型优先，本地兜底） */
+  /* 外部解析服务(可选:XHS-Downloader / Douyin_TikTok_Download_API) */
+  ipcMain.handle('mediaParser:get', () => getMediaParserConf())
+  ipcMain.handle('mediaParser:set', (_e, conf: { xhs?: string; douyin?: string }) => saveMediaParserConf(conf))
+  ipcMain.handle('mediaParser:test', (_e, base: string) => testMediaParser(base))
+  ipcMain.handle('mediaParser:builtinStatus', () => xhsSidecarStatus())
+  ipcMain.handle('mediaParser:builtinEnable', async (_e) => enableBuiltinXhs())
+  ipcMain.handle('mediaParser:builtinDisable', () => {
+    stopXhsSidecar()
+    setBuiltinXhs(false)
+  })
+
+  /* 重新抓取图文(存量收藏图片未落地/链接内容更新时) */
+  ipcMain.handle('platform:refresh', async (_e, id: string) => {
+    const { refreshPlatformContent } = await import('./platforms')
+    return refreshPlatformContent(id)
+  })
+
   ipcMain.handle('platform:retag', async () => {
     const db = getDb()
     const rows = db
@@ -590,109 +582,7 @@ function registerPlatformIpc(): void {
 }
 
 /* ---- 订阅时间线（RSS/Atom） ---- */
-function registerSubsIpc(): void {
-  ipcMain.handle('subs:add', async (_e, url: string) => addSubscription(url))
-
-  ipcMain.handle('subs:list', () => {
-    const db = getDb()
-    return db
-      .prepare(`SELECT id, kind, title, feed_url, site_url, unread, last_fetch, enabled FROM subscriptions ORDER BY created_at`)
-      .all()
-  })
-
-  ipcMain.handle('subs:remove', (_e, id: number) => {
-    const db = getDb()
-    db.prepare(`DELETE FROM feed_items WHERE subscription_id = ?`).run(id)
-    db.prepare(`DELETE FROM subscriptions WHERE id = ?`).run(id)
-  })
-
-  ipcMain.handle('subs:refresh', async (_e, id?: number) => {
-    if (id) return refreshSubscription(id)
-    await refreshAll()
-    return null
-  })
-
-  ipcMain.handle('subs:items', (_e, opts?: { subId?: number; onlyUnread?: boolean; limit?: number }) => {
-    const db = getDb()
-    const limit = opts?.limit ?? 100
-    const where: string[] = []
-    const params: unknown[] = []
-    if (opts?.subId) {
-      where.push('subscription_id = ?')
-      params.push(opts.subId)
-    }
-    if (opts?.onlyUnread) where.push('read = 0')
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-    return db
-      .prepare(`SELECT * FROM feed_items ${whereSql} ORDER BY published_at DESC LIMIT ?`)
-      .all(...params, limit)
-  })
-
-  ipcMain.handle('subs:markRead', (_e, itemId: string, read: boolean) => {
-    const db = getDb()
-    db.prepare(`UPDATE feed_items SET read = ? WHERE id = ?`).run(read ? 1 : 0, itemId)
-    /* R23：必须限定目标订阅——旧 SQL 缺 WHERE 把所有订阅的未读数
-       都覆盖成同一值 */
-    db.prepare(
-      `UPDATE subscriptions SET unread = (
-         SELECT COUNT(*) FROM feed_items
-         WHERE subscription_id = subscriptions.id AND read = 0
-       ) WHERE id = (SELECT subscription_id FROM feed_items WHERE id = ?)`
-    ).run(itemId)
-  })
-
-  ipcMain.handle('subs:star', (_e, itemId: string, starred: boolean) => {
-    getDb().prepare(`UPDATE feed_items SET starred = ? WHERE id = ?`).run(starred ? 1 : 0, itemId)
-  })
-}
-
 /* ---- F05：批量导入导出 ---- */
-function registerIoIpc(): void {
-  ipcMain.handle('io:importBookmarks', async (_e, html: string) => {
-    const m = await import('./io')
-    return m.importBookmarks(html)
-  })
-  ipcMain.handle('io:importOpml', async (_e, xml: string) => {
-    const m = await import('./io')
-    return m.importOpml(xml)
-  })
-  ipcMain.handle('io:importJson', async (_e, json: string) => {
-    const m = await import('./io')
-    return m.importJson(json)
-  })
-  ipcMain.handle('io:exportJson', async () => {
-    const m = await import('./io')
-    return m.exportJson()
-  })
-  /* N09：文件读写只允许会话内经对话框选择的路径（纵深防御） */
-  const sessionPaths = new Set<string>()
-  ipcMain.handle('io:pickOpenFile', async (_e, extensions: string[]): Promise<string | null> => {
-    const focused = win()
-    const opts: Electron.OpenDialogOptions = { properties: ['openFile'], filters: [{ name: '导入文件', extensions }] }
-    const res = focused ? await dialog.showOpenDialog(focused, opts) : await dialog.showOpenDialog(opts)
-    const p = res.canceled ? null : (res.filePaths[0] ?? null)
-    if (p) sessionPaths.add(p)
-    return p
-  })
-  ipcMain.handle('io:pickSaveFile', async (_e, defaultName: string): Promise<string | null> => {
-    const focused = win()
-    const res = focused
-      ? await dialog.showSaveDialog(focused, { defaultPath: defaultName })
-      : await dialog.showSaveDialog({ defaultPath: defaultName })
-    const p = res.canceled ? null : (res.filePath ?? null)
-    if (p) sessionPaths.add(p)
-    return p
-  })
-  ipcMain.handle('io:readFile', (_e, path: string) => {
-    if (!sessionPaths.has(path)) throw new Error('路径未经用户选择，拒绝读取')
-    return ioModule.readTextFile(path)
-  })
-  ipcMain.handle('io:writeFile', (_e, path: string, content: string) => {
-    if (!sessionPaths.has(path)) throw new Error('路径未经用户选择，拒绝写入')
-    return ioModule.writeTextFile(path, content)
-  })
-}
-
 /* ---- F03：笔记与划线 ---- */
 function registerNotesIpc(): void {
   ipcMain.handle('notes:list', (_e, contentId: string) => {

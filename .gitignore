@@ -17,3 +17,6 @@ Thumbs.db
 # 本地环境
 .env
 .env.*
+
+# 内置模型(int8 量化,194MB;克隆后走网络兜底下载)
+resources/models/

@@ -7,9 +7,10 @@ import { OrganizeView } from './components/OrganizeView'
 import { FilesView } from './components/FilesView'
 import { SearchView } from './components/SearchView'
 import { PlatformView } from './components/PlatformView'
-import { SubscriptionsView } from './components/SubscriptionsView'
+import { StatusView } from './components/StatusView'
 import { SearchResults } from './components/SearchResults'
 import { SettingsView } from './components/SettingsView'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 export default function App(): React.ReactNode {
   const view = useUiStore((s) => s.view)
@@ -19,6 +20,7 @@ export default function App(): React.ReactNode {
     <div className="app">
       <Sidebar />
       <main className="main">
+        <ErrorBoundary>
         {searchQuery ? (
           <SearchResults />
         ) : view === 'files' ? (
@@ -29,19 +31,21 @@ export default function App(): React.ReactNode {
           <SearchView />
         ) : view === 'platform' ? (
           <PlatformView />
-        ) : view === 'subscriptions' ? (
-          <SubscriptionsView />
+        ) : view === 'status' ? (
+          <StatusView />
         ) : view === 'settings' ? (
           <SettingsView />
         ) : (
           <EmptyState />
         )}
+        </ErrorBoundary>
       </main>
       <ImportModal />
       <DetailModal />
     </div>
   )
 }
+
 
 function EmptyState(): React.ReactNode {
   return <FirstRun />

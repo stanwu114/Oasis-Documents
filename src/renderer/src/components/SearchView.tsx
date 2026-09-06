@@ -1,11 +1,12 @@
-import { useRef, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { Icon } from './Icon'
 import { MasonryGrid } from './MasonryGrid'
 import { toMediaUrl } from '../lib/media'
 import { useUiStore } from '../stores/uiStore'
+import { highlightPattern } from '../../../shared/highlight'
 import type { SearchResult } from '../../../shared/ipc'
 
-type Mode = 'all' | 'images' | 'byImage'
+type Mode = 'docs' | 'images' | 'byImage'
 
 /** 相似度徽标文本：score（1-距离）钳制为 0–100% */
 function simLabel(score: number): string {
@@ -13,7 +14,7 @@ function simLabel(score: number): string {
 }
 
 export function SearchView(): React.ReactNode {
-  const [mode, setMode] = useState<Mode>('all')
+  const [mode, setMode] = useState<Mode>('docs')
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [searched, setSearched] = useState(false)
@@ -22,17 +23,23 @@ export function SearchView(): React.ReactNode {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
+  /* Everything 式高亮:查询词元(含中文二元词片)命中处黄底标记 */
+  const hl = useMemo(() => {
+    const p = highlightPattern(query)
+    return p ? new RegExp(`(${p})`, 'gi') : null
+  }, [query])
+
   const runTextSearch = async (): Promise<void> => {
     const q = query.trim()
     if (q.length < 2) return
     setBusy(true)
     setSearched(true)
     try {
-      /* R18：搜图片模式走 CLIP 图文对齐通道 */
+      /* R18：以文搜图走 CLIP 图文对齐通道;以文搜文仅检索文档;上限 200 条 */
       const r: SearchResult[] =
         mode === 'images'
-          ? await window.oasis.search.imagesByText(q, 40)
-          : await window.oasis.search.query(q, { limit: 40 })
+          ? await window.oasis.search.imagesByText(q, 200)
+          : await window.oasis.search.query(q, { limit: 200, type: 'document' })
       setResults(r)
     } finally {
       setBusy(false)
@@ -47,7 +54,7 @@ export function SearchView(): React.ReactNode {
     /* 查询图复制进媒体目录 → 白名单内可预览 */
     void window.oasis.search.stageQueryImage(path).then(setPreviewUrl)
     try {
-      setResults(await window.oasis.search.queryImage(path, { limit: 40 }))
+      setResults(await window.oasis.search.queryImage(path, { limit: 200 }))
     } finally {
       setBusy(false)
     }
@@ -60,19 +67,19 @@ export function SearchView(): React.ReactNode {
     setSearched(false)
   }
 
-  /* 图片类结果（搜图片/以图搜图）用瀑布流卡片；全部模式用列表 */
+  /* 以文搜图/以图搜图(仅图片)用瀑布流卡片;以文搜文(仅文档)用列表 */
   const cardMode = mode === 'images' || mode === 'byImage'
   const cardItems = results.filter((r) => r.thumbnailPath || r.sourcePath)
 
   return (
     <div className="view" style={{ maxWidth: 940 }}>
       <h1 className="view-title">文件搜索</h1>
-      <p className="view-sub">以文搜文（语义）· 以文搜图 · 以图搜图 —— 语义检索需在设置中就绪本地模型</p>
+      <p className="view-sub">以文搜文（仅文档） · 以文搜图（仅图片） · 以图搜图（仅图片）</p>
 
       {/* 模式切换 */}
       <div className="seg" style={{ display: 'inline-flex', marginBottom: 16 }}>
-        <button type="button" className={mode === 'all' ? 'on' : ''} onClick={() => setMode('all')}>全部内容</button>
-        <button type="button" className={mode === 'images' ? 'on' : ''} onClick={() => setMode('images')}>搜图片</button>
+        <button type="button" className={mode === 'docs' ? 'on' : ''} onClick={() => setMode('docs')}>以文搜文</button>
+        <button type="button" className={mode === 'images' ? 'on' : ''} onClick={() => setMode('images')}>以文搜图</button>
         <button type="button" className={mode === 'byImage' ? 'on' : ''} onClick={() => setMode('byImage')}>以图搜图</button>
       </div>
 
@@ -123,7 +130,7 @@ export function SearchView(): React.ReactNode {
           <input
             className="settings-input"
             style={{ flex: 1, padding: '9px 12px', fontSize: 14 }}
-            placeholder={mode === 'images' ? '描述图片内容，如：橙色封面设计…' : '语义搜索所有内容：文档、图片、收藏、订阅…'}
+            placeholder={mode === 'images' ? '描述图片内容，如：橙色封面设计…' : '搜索文档：报告、笔记、代码、PDF…'}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && void runTextSearch()}
@@ -143,37 +150,9 @@ export function SearchView(): React.ReactNode {
           </div>
 
           {cardMode && cardItems.length > 0 ? (
-            <MasonryGrid
-              items={cardItems.map((r) => ({ key: r.id }))}
-              hasImage={() => true}
-              render={(_it, onImageLoad, style) => {
-                const r = cardItems.find((x) => x.id === _it.key)
-                if (!r) return null
-                const thumb = r.thumbnailPath ? toMediaUrl(r.thumbnailPath) : r.sourcePath ? toMediaUrl(r.sourcePath) : undefined
-                return (
-                  <button
-                    type="button"
-                    key={r.id}
-                    className="note-card"
-                    style={style}
-                    onClick={() => r.sourcePath && window.oasis.files.reveal(r.sourcePath)}
-                    title={r.title}
-                  >
-                    <div className="note-card-cover">
-                      {thumb ? (
-                        <img src={thumb} alt={r.title} loading="lazy" data-mkey={r.id} onLoad={(e) => onImageLoad(e.currentTarget)} />
-                      ) : null}
-                      <span className="sim-badge">{simLabel(r.score)}</span>
-                    </div>
-                    <div className="note-card-body">
-                      <span className="note-card-title">{r.title}</span>
-                      <span className="note-card-meta">相似度 {simLabel(r.score)}</span>
-                    </div>
-                  </button>
-                )
-              }}
-            />
+            <ResultCards items={cardItems} re={hl} />
           ) : !cardMode && results.length > 0 ? (
+            /* 以文搜文:结果均为文档,统一列表 */
             <div className="search-results-list">
               {results.map((r: SearchResult) => (
                 <button
@@ -184,8 +163,14 @@ export function SearchView(): React.ReactNode {
                 >
                   <Icon name={r.type === 'image' ? 'image' : 'doc'} size={15} />
                   <div className="search-result-body">
-                    <span className="search-result-title">{r.title}</span>
-                    {r.snippet ? <span className="search-result-snippet">{r.snippet}</span> : null}
+                    <span className="search-result-title">
+                      <Highlight text={r.title} re={hl} />
+                    </span>
+                    {r.snippet ? (
+                      <span className="search-result-snippet">
+                        <Highlight text={r.snippet} re={hl} />
+                      </span>
+                    ) : null}
                   </div>
                   <span className="search-result-score">{simLabel(r.score)}</span>
                 </button>
@@ -202,5 +187,61 @@ export function SearchView(): React.ReactNode {
         </>
       ) : null}
     </div>
+  )
+}
+
+/** 图片结果卡片墙(以文搜图/以图搜图共用;标题同样高亮命中词) */
+function ResultCards({ items, re }: { items: SearchResult[]; re?: RegExp | null }): React.ReactNode {
+  return (
+    <MasonryGrid
+      items={items.map((r) => ({ key: r.id }))}
+      hasImage={() => true}
+      render={(it, onImageLoad, style) => {
+        const r = items.find((x) => x.id === it.key)
+        if (!r) return null
+        const thumb = r.thumbnailPath ? toMediaUrl(r.thumbnailPath) : r.sourcePath ? toMediaUrl(r.sourcePath) : undefined
+        return (
+          <button
+            type="button"
+            key={r.id}
+            className="note-card"
+            style={style}
+            onClick={() => r.sourcePath && window.oasis.files.reveal(r.sourcePath)}
+            title={r.title}
+          >
+            <div className="note-card-cover">
+              {thumb ? (
+                <img src={thumb} alt={r.title} loading="lazy" data-mkey={r.id} onLoad={(e) => onImageLoad(e.currentTarget)} />
+              ) : null}
+              <span className="sim-badge">{simLabel(r.score)}</span>
+            </div>
+            <div className="note-card-body">
+              <span className="note-card-title">
+                <Highlight text={r.title} re={re ?? null} />
+              </span>
+              <span className="note-card-meta">相似度 {simLabel(r.score)}</span>
+            </div>
+          </button>
+        )
+      }}
+    />
+  )
+}
+
+/** Everything 式关键词高亮:捕获组 split,奇数位即命中片段 */
+function Highlight({ text, re }: { text: string; re: RegExp | null }): React.ReactNode {
+  if (!text || !re) return <>{text}</>
+  const parts = text.split(re)
+  if (parts.length === 1) return <>{text}</>
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="console-highlight">{part}</mark>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
   )
 }

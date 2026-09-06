@@ -5,8 +5,6 @@ import { registerIpc } from './ipc'
 import { closeDb, getDb } from './db'
 import { startWatching, stopWatching, onIndexProgress } from './indexer/watcher'
 import { reindexPending } from './indexer/embedding-pipeline'
-import { startRssScheduler } from './subscriptions/rss'
-import { startNewsletterScheduler } from './newsletter'
 import { getMediaDir, getThumbnailsDir } from './dataLocation'
 
 /* 媒体协议：渲染进程（http/dev 或 file/prod）统一经此加载本地图片，
@@ -16,6 +14,8 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif|tiff?|heic)$/i
+/* 媒体目录(收藏图/视频)放行的视频扩展;raw 搜索预览仍仅限图片 */
+const VIDEO_EXT = /\.(mp4|webm|mov|m4v)$/i
 
 /* N09：raw 协议白名单——已入库路径（30 秒缓存）或应用媒体目录 */
 let rawPathsCache = new Set<string>()
@@ -54,7 +54,7 @@ function registerMediaProtocol(): void {
       if (p && IMAGE_EXT.test(p) && isRawPathAllowed(p)) filePath = p
     }
 
-    if (!filePath || !IMAGE_EXT.test(filePath)) {
+    if (!filePath || !(IMAGE_EXT.test(filePath) || VIDEO_EXT.test(filePath))) {
       return new Response(null, { status: 403 })
     }
     return net.fetch(pathToFileURL(filePath).toString())
@@ -122,18 +122,14 @@ app.whenReady().then(() => {
   const win = createWindow()
   win.once('ready-to-show', () => {
     setImmediate(() => setImmediate(() => {
+      /* 内置小红书引擎:启用过则后台拉起(解析请求到来前就绪) */
+      void import('./platforms/xhs-sidecar').then((m) => {
+        if (m.builtinXhsEnabled()) void m.startXhsSidecar().catch(() => false)
+      })
       const queued = reindexPending()
       if (queued > 0) console.log(`[embed-pipeline] 空闲补扫 ${queued} 条待嵌入内容`)
     }))
   })
-
-  /* F05：RSS 持久调度（每 30 分钟检查，单源最小间隔 1 小时，连续失败自动禁用） */
-  startRssScheduler()
-
-  /* Newsletter/IMAP：启用时定时拉取（每 30 分钟） */
-  startNewsletterScheduler()
-
-  createWindow()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -144,22 +140,37 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-/* N04+N15：退出前异步收尾——先 flush 嵌入缓冲（防丢向量），再停 watcher，最后关库 */
+/* N04+N15：退出前异步收尾——先中止在途索引批次并停 watcher（不再产生新任务），
+   再 flush 嵌入缓冲（防丢向量），最后关库。顺序很重要：
+   flush 放在停任务之后,否则 flush 完又有人入队,缓冲照样丢 */
 app.on('will-quit', (event) => {
   if ((app as unknown as { __drained?: boolean }).__drained) return
   event.preventDefault() /* 拦截首次退出，收尾完成后真正退出 */
   ;(app as unknown as { __drained?: boolean }).__drained = true
   void (async () => {
     try {
-      const { flushAll } = await import('./indexer/embedding-pipeline')
-      await flushAll() /* 缓冲向量落盘（≤几十条，毫秒级） */
-    } catch (e) {
-      console.warn('[quit] 嵌入缓冲 flush 失败（下次启动补扫自愈）:', e instanceof Error ? e.message : e)
+      /* 在途索引 worker 检测到代际变化会在当前文件后尽快退出 */
+      const { abortRunningIndexBatches } = await import('./indexer/pipeline')
+      abortRunningIndexBatches()
+    } catch {
+      /* 收尾路径上的失败不阻塞退出 */
     }
     try {
       await stopWatching()
     } catch {
       /* watcher 关闭失败不阻塞退出 */
+    }
+    try {
+      const { stopXhsSidecar } = await import('./platforms/xhs-sidecar')
+      stopXhsSidecar()
+    } catch {
+      /* 内置引擎退出失败不阻塞 */
+    }
+    try {
+      const { flushAll } = await import('./indexer/embedding-pipeline')
+      await flushAll() /* 缓冲向量落盘（≤几十条，毫秒级） */
+    } catch (e) {
+      console.warn('[quit] 嵌入缓冲 flush 失败（下次启动补扫自愈）:', e instanceof Error ? e.message : e)
     }
     closeDb()
     app.quit()

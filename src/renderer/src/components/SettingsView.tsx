@@ -1,591 +1,471 @@
 import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 import { useUiStore } from '../stores/uiStore'
-import type { EmbeddingSettings, ModelStatus, OnlineModelConf } from '../../../shared/ipc'
+import type { EmbeddingSettings, ModelStatus, ModelAssignments } from '../../../shared/ipc'
 
-const MODEL_LABEL: Record<string, string> = {
-  bge: 'BGE-small-zh（文本语义检索，约 100MB）',
-  clip: 'CLIP ViT-B/32（图片检索 / 以文搜图，约 150MB）'
+/* ================================================================
+   设置页:本地向量模型(三卡片) + 功能设置 + 在线模型接入
+   (监控目录/邮件订阅/平台账号/导入导出/索引诊断模块已移除:
+    目录管理在侧栏"我的文件";系统状态独立成页)
+   ================================================================ */
+
+type ProviderId = 'bailian' | 'zhipu' | 'custom'
+
+const PROVIDERS: { id: ProviderId; label: string; baseUrl: string; keyHint: string }[] = [
+  { id: 'bailian', label: '百炼（阿里 DashScope）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', keyHint: 'sk-…' },
+  { id: 'zhipu', label: '智谱（BigModel）', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', keyHint: '…' },
+  { id: 'custom', label: '自定义（OpenAI 兼容）', baseUrl: '', keyHint: 'sk-…' }
+]
+
+/* 统一接入 → 旧引擎字段映射(bailian 走 DashScope=旧 qwen 通道) */
+const PROVIDER_TO_LEGACY: Record<ProviderId, 'qwen' | 'zhipu' | 'custom'> = {
+  bailian: 'qwen',
+  zhipu: 'zhipu',
+  custom: 'custom'
 }
 
+/* 本地模型卡片定义(仅展示这三张;legacy 'clip' 英文版不展示) */
+const LOCAL_MODELS: { key: string; title: string; desc: string; badge?: string; badgeDanger?: boolean }[] = [
+  { key: 'bge', title: '文本向量模型', desc: 'BGE-small-zh-v1.5 · 本地 ONNX · 约 100MB · 以文搜文语义检索' },
+  { key: 'clip-zh', title: '图片向量模型', desc: '中文 CLIP ViT-B/16 int8 · 约 190MB · 以文搜图 / 以图搜图' },
+  { key: 'vl-embedding', title: '多模态向量模型', desc: 'qwen3-vl-embedding · 图文统一向量空间', badge: '需要 GPU', badgeDanger: true }
+]
+
+type TestResult =
+  | { ok: true; models: { id: string; category: string }[] }
+  | { ok: false; error: string }
+  | null
+
 export function SettingsView(): React.ReactNode {
-  const [watchPaths, setWatchPaths] = useState<string[]>([])
-  const [newPath, setNewPath] = useState('')
   const [embedding, setEmbedding] = useState<EmbeddingSettings | null>(null)
   const [saving, setSaving] = useState(false)
   const [models, setModels] = useState<ModelStatus[]>([])
-  const [stats, setStats] = useState<Awaited<ReturnType<typeof window.oasis.diag.indexStats>> | null>(null)
+
+  /* 外部解析服务(可选) */
+  const [mpXhs, setMpXhs] = useState('')
+  const [mpDy, setMpDy] = useState('')
+  const [mpTesting, setMpTesting] = useState<'xhs' | 'douyin' | null>(null)
+  const [mpResult, setMpResult] = useState<Record<string, boolean | null>>({})
+  /* 内置小红书引擎(全部容错:通道缺失/服务失败绝不拖垮设置页) */
+  const [builtin, setBuiltin] = useState<{ installed: boolean; running: boolean; enabled: boolean } | null>(null)
+  const [builtinBusy, setBuiltinBusy] = useState(false)
+  const [builtinError, setBuiltinError] = useState<string | null>(null)
+
+  const refreshBuiltin = async (): Promise<void> => {
+    try {
+      setBuiltinError(null)
+      const st = await window.oasis.platform.mediaParser?.builtin?.status()
+      if (st) setBuiltin(st)
+      else setBuiltinError('通道不可用(需完全重启应用)')
+    } catch (e) {
+      setBuiltinError(e instanceof Error ? e.message : String(e))
+      setBuiltin(null)
+    }
+  }
+
+  /* 在线接入表单(镜像 embedding.onlineProvider) */
+  const [provider, setProvider] = useState<ProviderId>('bailian')
+  const [apiKey, setApiKey] = useState('')
+  const [baseUrl, setBaseUrl] = useState(PROVIDERS[0].baseUrl)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<TestResult>(null)
+  const [assignments, setAssignments] = useState<ModelAssignments>({})
 
   useEffect(() => {
-    void window.oasis.files.getWatchPaths().then(setWatchPaths)
-    void window.oasis.settings.getEmbedding().then(setEmbedding)
-    void window.oasis.models.status().then(setModels)
-    void window.oasis.diag.indexStats().then(setStats)
+    /* 设置页初始化逐项容错:任何一项失败只影响对应区块,不拖垮整页 */
+    void window.oasis.settings
+      .getEmbedding()
+      .then((e) => {
+        setEmbedding(e)
+        if (e.onlineProvider) {
+          setProvider(e.onlineProvider.provider)
+          setApiKey(e.onlineProvider.apiKey)
+          setBaseUrl(e.onlineProvider.baseUrl || (PROVIDERS.find((p) => p.id === e.onlineProvider?.provider)?.baseUrl ?? ''))
+        }
+        if (e.modelAssignments) setAssignments(e.modelAssignments)
+      })
+      .catch((e: unknown) => useUiStore.getState().showToast(`配置读取失败：${e instanceof Error ? e.message : e}`, 'error'))
+    void window.oasis.models.status().then(setModels).catch(() => undefined)
+    void Promise.resolve(window.oasis.platform.mediaParser?.get?.())
+      .then((c) => {
+        if (!c) return
+        setMpXhs(c.xhs ?? '')
+        setMpDy(c.douyin ?? '')
+      })
+      .catch(() => undefined)
+    void refreshBuiltin()
     const off = window.oasis.on.modelProgress((s) => {
       setModels((prev) => prev.map((m) => (m.name === s.name ? s : m)))
     })
     return off
   }, [])
 
-  const addPath = async (): Promise<void> => {
-    const p = newPath.trim()
-    if (!p) return
-    await window.oasis.files.addWatchPath(p) /* ~ 展开由主进程处理 */
-    setWatchPaths(await window.oasis.files.getWatchPaths())
-    setNewPath('')
+  const switchProvider = (id: ProviderId): void => {
+    setProvider(id)
+    setBaseUrl(PROVIDERS.find((p) => p.id === id)?.baseUrl ?? '')
+    setTestResult(null)
   }
 
-  const pickDirectories = async (): Promise<void> => {    const picked = await window.oasis.files.pickDirectories()
-    if (picked.length === 0) return
-    await window.oasis.files.addWatchPaths(picked)
-    setWatchPaths(await window.oasis.files.getWatchPaths())
-    useUiStore.getState().showToast(`已添加 ${picked.length} 个监控目录`)
-  }
-
-  /* F05：导入导出 */
-  const onImport = async (kind: 'bookmarks' | 'opml' | 'json'): Promise<void> => {
-    const exts = kind === 'bookmarks' ? ['html', 'htm'] : kind === 'opml' ? ['opml', 'xml'] : ['json']
-    const path = await window.oasis.io.pickOpenFile(exts)
-    if (!path) return
+  const runTest = async (): Promise<void> => {
+    setTesting(true)
+    setTestResult(null)
     try {
-      const text = await window.oasis.io.readFile(path)
-      if (kind === 'bookmarks') {
-        const r = await window.oasis.io.importBookmarks(text)
-        useUiStore.getState().showToast(`书签导入完成：成功 ${r.added}，失败 ${r.failed}`)
-      } else if (kind === 'opml') {
-        const r = await window.oasis.io.importOpml(text)
-        useUiStore.getState().showToast(`订阅导入完成：新增 ${r.added}，失败 ${r.failed}`)
-      } else {
-        const r = await window.oasis.io.importJson(text)
-        useUiStore.getState().showToast(`JSON 导入完成：收藏 ${r.contents}，订阅 ${r.subscriptions}`)
+      const r = await window.oasis.llm.testProvider({ provider, apiKey, baseUrl: provider === 'custom' ? baseUrl : undefined })
+      setTestResult(r)
+      if (r.ok && r.models.length > 0) {
+        /* 按类别自动指派:各类别取第一个命中;未命中保留现有 */
+        setAssignments((prev) => {
+          const next = { ...prev }
+          for (const cat of ['embedding', 'text', 'multimodal', 'audio'] as const) {
+            if (!next[cat]) {
+              const hit = r.models.find((m) => m.category === cat)
+              if (hit) next[cat] = hit.id
+            }
+          }
+          return next
+        })
       }
-    } catch (e) {
-      useUiStore.getState().showToast(`导入失败：${e instanceof Error ? e.message : e}`, 'error')
     } finally {
+      setTesting(false)
     }
   }
 
-  const onExport = async (): Promise<void> => {
-    const path = await window.oasis.io.pickSaveFile(`oasis-documents-backup-${new Date().toISOString().slice(0, 10)}.json`)
-    if (!path) return
-    try {
-      const json = await window.oasis.io.exportJson()
-      await window.oasis.io.writeFile(path, json)
-      useUiStore.getState().showToast(`已导出`)
-    } catch (e) {
-      useUiStore.getState().showToast(`导出失败：${e instanceof Error ? e.message : e}`, 'error')
-    } finally {
-    }
+  const categoryModels = (cat: 'embedding' | 'text' | 'multimodal' | 'audio'): string[] => {
+    if (!testResult?.ok) return []
+    const hits = testResult.models.filter((m) => m.category === cat).map((m) => m.id)
+    /* 现有指派不在列表里也保留(可能是手填或列表接口不含) */
+    const cur = assignments[cat]
+    return cur && !hits.includes(cur) ? [cur, ...hits] : hits
   }
 
-  const removePath = async (p: string): Promise<void> => {
-    await window.oasis.files.removeWatchPath(p)
-    setWatchPaths(await window.oasis.files.getWatchPaths())
+  const setAdvanced = (patch: Partial<EmbeddingSettings['advanced']>): void => {
+    if (!embedding) return
+    setEmbedding({ ...embedding, advanced: { ...embedding.advanced, ...patch } })
   }
 
-  const saveEmbedding = async (): Promise<void> => {
+  const save = async (): Promise<void> => {
     if (!embedding) return
     setSaving(true)
     try {
-      await window.oasis.settings.setEmbedding(embedding)
+      const legacyKey = PROVIDER_TO_LEGACY[provider]
+      const onlineOn = apiKey.trim().length > 0
+      const next: EmbeddingSettings = {
+        ...embedding,
+        onlineProvider: { provider, apiKey, baseUrl },
+        modelAssignments: assignments,
+        /* 映射到既有引擎:向量走 providers.*,LLM/多模态走 onlineLlm/onlineMultimodal */
+        defaultProvider: onlineOn && assignments.embedding ? legacyKey : 'local',
+        providers: {
+          ...embedding.providers,
+          [legacyKey]: {
+            ...embedding.providers[legacyKey],
+            enabled: onlineOn && Boolean(assignments.embedding),
+            apiKey,
+            ...(assignments.embedding ? { model: assignments.embedding } : {}),
+            ...(legacyKey === 'custom' && provider === 'custom' ? { baseUrl, dimensions: embedding.providers.custom.dimensions } : {})
+          } as EmbeddingSettings['providers']['qwen']
+        },
+        onlineLlm: {
+          enabled: onlineOn && Boolean(assignments.text),
+          provider: legacyKey,
+          apiKey,
+          model: assignments.text ?? embedding.onlineLlm.model,
+          ...(legacyKey === 'custom' ? { baseUrl } : {})
+        },
+        onlineMultimodal: {
+          enabled: onlineOn && Boolean(assignments.multimodal),
+          provider: legacyKey,
+          apiKey,
+          model: assignments.multimodal ?? embedding.onlineMultimodal.model,
+          ...(legacyKey === 'custom' ? { baseUrl } : {})
+        }
+      }
+      await window.oasis.settings.setEmbedding(next)
+      setEmbedding(next)
+      useUiStore.getState().showToast('设置已保存')
     } finally {
       setSaving(false)
     }
   }
 
-  const setProvider = (p: EmbeddingSettings['defaultProvider']): void => {
-    if (!embedding) return
-    /* R10：选为默认服务商即视为启用——旧实现从不设置 enabled，
-       填了 Key 也被静默判为未启用而回落本地模型 */
-    const providers = { ...embedding.providers }
-    if (p !== 'local' && p !== 'custom') {
-      const conf = providers[p] as EmbeddingSettings['providers']['openai']
-      if (conf.apiKey) providers[p] = { ...conf, enabled: true }
-    } else if (p === 'custom') {
-      const conf = providers.custom
-      if (conf.apiKey) providers.custom = { ...conf, enabled: true }
-    }
-    setEmbedding({ ...embedding, defaultProvider: p, providers })
+  const saveMediaParser = async (): Promise<void> => {
+    await window.oasis.platform.mediaParser.set({
+      xhs: mpXhs.trim() || undefined,
+      douyin: mpDy.trim() || undefined
+    })
+    useUiStore.getState().showToast('外部解析服务已保存')
   }
 
-  const setProviderConf = (
-    key: 'openai' | 'zhipu' | 'qwen' | 'custom',
-    patch: Partial<EmbeddingSettings['providers']['openai']>
-  ): void => {
-    if (!embedding) return
-    setEmbedding({
-      ...embedding,
-      providers: { ...embedding.providers, [key]: { ...embedding.providers[key], ...patch } }
-    })
+  const testMp = async (kind: 'xhs' | 'douyin'): Promise<void> => {
+    const base = kind === 'xhs' ? mpXhs.trim() : mpDy.trim()
+    if (!base) return
+    setMpTesting(kind)
+    try {
+      const ok = await window.oasis.platform.mediaParser.test(base)
+      setMpResult((r) => ({ ...r, [kind]: ok }))
+    } finally {
+      setMpTesting(null)
+    }
   }
+
+  const toggleBuiltin = async (): Promise<void> => {
+    setBuiltinBusy(true)
+    try {
+      if (builtin?.enabled) {
+        await window.oasis.platform.mediaParser?.builtin?.disable()
+      } else {
+        const ok = await window.oasis.platform.mediaParser?.builtin?.enable()
+        useUiStore.getState().showToast(ok ? '内置小红书引擎已就绪' : '引擎已下载但启动失败,解析时将自动重试', ok ? 'info' : 'error')
+      }
+      await refreshBuiltin()
+    } catch (e) {
+      useUiStore.getState().showToast(`内置引擎操作失败：${e instanceof Error ? e.message : e}`, 'error')
+    } finally {
+      setBuiltinBusy(false)
+    }
+  }
+
+  const modelStatusOf = (key: string): ModelStatus | undefined =>
+    key === 'vl-embedding' ? undefined : models.find((m) => m.name === key)
 
   return (
     <div className="settings-view">
       <h1 className="view-title">设置</h1>
-      <p className="view-sub">监控目录与嵌入引擎配置。所有数据仅存本机。</p>
+      <p className="view-sub">本地模型与在线模型接入。监控目录请到侧栏「我的文件」管理。</p>
 
-      {/* 监控目录 */}
+      {/* 本地向量模型 */}
       <section className="settings-section">
-        <h3>监控目录</h3>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-          <button type="button" className="btn primary" onClick={() => void pickDirectories()}>
-            <Icon name="folder" size={13} /> 选择文件夹…
-          </button>
+        <h3>本地向量模型</h3>
+        <div className="model-grid">
+          {LOCAL_MODELS.map((m) => {
+            const st = modelStatusOf(m.key)
+            return (
+              <div key={m.key} className="model-card">
+                <div className="model-card-head">
+                  <span className="model-card-title">{m.title}</span>
+                  {m.badge ? <span className="model-badge-gpu">{m.badge}</span> : null}
+                </div>
+                <p className="model-card-desc">{m.desc}</p>
+                {st ? (
+                  <>
+                    {st.downloading ? (
+                      <div className="progress-track" style={{ margin: '8px 0 4px' }}>
+                        <div className="progress-bar" style={{ width: `${Math.round(st.progress * 100)}%` }} />
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={`btn small ${st.downloaded ? 'ghost' : 'primary'}`}
+                      disabled={st.downloading || st.downloaded}
+                      onClick={() => {
+                        void window.oasis.models.download(m.key).catch((e: unknown) =>
+                          useUiStore.getState().showToast(`下载失败：${e instanceof Error ? e.message : e}`, 'error')
+                        )
+                      }}
+                    >
+                      {st.downloaded ? '已就绪' : st.downloading ? `${Math.round(st.progress * 100)}%` : '下载'}
+                    </button>
+                  </>
+                ) : (
+                  <p className="model-card-hint">本地推理包暂未内置——请通过下方「在线模型接入」使用,或等待后续版本</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </section>
+
+      {/* 在线模型接入 */}
+      <section className="settings-section">
+        <h3>在线模型接入</h3>
+        <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 12 }}>
+          接入第三方大模型服务商后,自动拉取模型列表并按 向量 / 文本 / 多模态 / 音频 分类指派。Key 经系统钥匙串加密,仅存本机。
+        </p>
+        <div className="settings-row">
+          <span>服务商</span>
+          <select className="settings-select" value={provider} onChange={(e) => switchProvider(e.target.value as ProviderId)}>
+            {PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
+          </select>
+        </div>
+        <div className="settings-row">
+          <span>API Key</span>
           <input
             className="settings-input"
-            style={{ flex: 1 }}
-            placeholder="或手动输入路径，如 ~/Downloads（回车添加）"
-            value={newPath}
-            onChange={(e) => setNewPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void addPath()}
+            style={{ width: 320 }}
+            type="password"
+            placeholder={PROVIDERS.find((p) => p.id === provider)?.keyHint}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
           />
-          <button type="button" className="btn ghost" onClick={() => void addPath()} disabled={!newPath.trim()}>
-            添加
+        </div>
+        <div className="settings-row">
+          <span>Base URL</span>
+          <input
+            className="settings-input"
+            style={{ width: 320 }}
+            placeholder={provider === 'custom' ? 'https://your-host/v1' : PROVIDERS.find((p) => p.id === provider)?.baseUrl}
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            readOnly={provider !== 'custom' && baseUrl === PROVIDERS.find((p) => p.id === provider)?.baseUrl}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '10px 0' }}>
+          <button type="button" className="btn ghost" onClick={() => void runTest()} disabled={testing || !apiKey.trim()}>
+            {testing ? '测试中…' : '测试连接'}
+          </button>
+          {testResult ? (
+            testResult.ok ? (
+              <span className="settings-value ok" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <Icon name="search" size={12} /> 连接成功 · 拉取到 {testResult.models.length} 个模型
+              </span>
+            ) : (
+              <span style={{ color: 'var(--danger)', fontSize: 12.5 }}>{testResult.error}</span>
+            )
+          ) : (
+            <span style={{ color: 'var(--fg-faint)', fontSize: 12 }}>先测试连接,通过后选择各类模型</span>
+          )}
+        </div>
+
+        {/* 模型分类指派(测试通过后展示) */}
+        {testResult?.ok ? (
+          <div className="model-assign-grid">
+            {([
+              { key: 'embedding', label: '向量模型', hint: '文本语义检索' },
+              { key: 'text', label: '文本模型', hint: 'AI 打标 / 理解' },
+              { key: 'multimodal', label: '多模态模型', hint: '图片理解' },
+              { key: 'audio', label: '音频模型', hint: '语音(预留)' }
+            ] as const).map((c) => (
+              <div key={c.key} className="model-assign-row">
+                <div className="model-assign-label">
+                  <span>{c.label}</span>
+                  <em>{c.hint}</em>
+                </div>
+                <select
+                  className="settings-select"
+                  value={assignments[c.key] ?? ''}
+                  onChange={(e) => setAssignments({ ...assignments, [c.key]: e.target.value || undefined })}
+                >
+                  <option value="">未指派</option>
+                  {categoryModels(c.key).map((id) => (
+                    <option key={id} value={id}>{id}</option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            {testResult.models.length > 0 && categoryModels('embedding').length === 0 ? (
+              <p className="model-card-hint">该服务商列表中没有识别出向量模型,可直接在设置文件中手动指定,或换用本地向量模型</p>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+          <button type="button" className="btn primary" onClick={() => void save()} disabled={saving}>
+            {saving ? '保存中…' : '保存设置'}
           </button>
         </div>
-        {watchPaths.map((p) => (
-          <div key={p} className="watch-path-row">
-            <Icon name="folder" size={14} />
-            <span className="watch-path-text" title={p}>{p}</span>
-            <button type="button" className="btn small danger-ghost" onClick={() => void removePath(p)}>
-              移除
-            </button>
-          </div>
-        ))}
-        {watchPaths.length === 0 ? (
-          <p style={{ color: 'var(--fg-faint)', fontSize: 12.5, margin: '6px 0' }}>
-            添加目录后，其中的图片/文档会被自动索引（node_modules、.git 等自动忽略）。
-          </p>
-        ) : null}
       </section>
 
-      {/* 模型管理 */}
+      {/* 外部解析服务(可选) */}
       <section className="settings-section">
-        <h3>本地模型（未下载时检索回退关键词匹配）</h3>
-        {models.map((m) => (
-          <div key={m.name} className="skill-row" style={{ borderTop: m === models[0] ? 'none' : '1px solid var(--border)' }}>
-            <div className="skill-body">
-              <span className="skill-name">{MODEL_LABEL[m.name] ?? m.name}</span>
-              {m.downloading ? (
-                <div className="progress-track" style={{ margin: '6px 0 2px' }}>
-                  <div className="progress-bar" style={{ width: `${Math.round(m.progress * 100)}%` }} />
-                </div>
-              ) : null}
-            </div>
-            <button
-              type="button"
-              className={`btn small ${m.downloaded ? 'ghost' : 'primary'}`}
-              disabled={m.downloading || m.downloaded}
-              onClick={() => {
-                void window.oasis.models.download(m.name).catch((e: unknown) =>
-                  useUiStore.getState().showToast(`下载失败：${e instanceof Error ? e.message : e}`, 'error')
-                )
-              }}
-            >
-              {m.downloaded ? '已就绪' : m.downloading ? `${Math.round(m.progress * 100)}%` : '下载'}
-            </button>
-          </div>
-        ))}
-      </section>
-
-      {/* 嵌入引擎（本地/在线检索向量来源） */}
-      {embedding ? (
-        <section className="settings-section">
-          <h3>检索嵌入引擎（向量来源：本地 ONNX 或 在线嵌入 API）</h3>
-          <div className="seg" style={{ display: 'inline-flex', marginBottom: 12 }}>
-            {(['local', 'openai', 'zhipu', 'qwen', 'custom'] as const).map((p) => (
-              <button key={p} type="button" className={embedding.defaultProvider === p ? 'on' : ''} onClick={() => setProvider(p)}>
-                {p === 'local' ? '本地 ONNX' : p === 'openai' ? 'OpenAI' : p === 'zhipu' ? '智谱' : p === 'qwen' ? '通义' : '自定义'}
-              </button>
-            ))}
-          </div>
-
-          {embedding.defaultProvider === 'local' ? (
-            <p className="settings-value" style={{ lineHeight: 1.8 }}>
-              本地模式：BGE-small-zh（文本）+ CLIP ViT-B/32（图片），ONNX CPU 推理，完全离线。
-              <br />模型未下载时检索自动回退到关键词匹配。图片搜索始终使用本地 CLIP。
-            </p>
-          ) : (
-            <ProviderForm embedding={embedding} setProviderConf={setProviderConf} />
-          )}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-            <button type="button" className="btn primary" onClick={() => void saveEmbedding()} disabled={saving}>
-              {saving ? '保存中…' : '保存设置'}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {/* 在线文本模型（LLM：文档 AI 打标） */}
-      {embedding ? (
-        <section className="settings-section">
-          <h3>在线文本模型（LLM · 文件收藏的文档 AI 打标）</h3>
-          <p className="settings-value" style={{ margin: '0 0 10px', lineHeight: 1.7 }}>
-            配置后导入的收藏内容由大模型归纳打标（如「极简装修」「K8s 运维」）；未配置或调用失败自动回退本地关键短语抽取。
-          </p>
-          <OnlineModelForm
-            conf={embedding.onlineLlm}
-            onChange={(patch) => setEmbedding({ ...embedding, onlineLlm: { ...embedding.onlineLlm, ...patch } })}
-            defaultModels={['glm-4-flash', 'qwen-plus', 'gpt-4o-mini']}
-          />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-            <button type="button" className="btn primary" onClick={() => void saveEmbedding()} disabled={saving}>
-              {saving ? '保存中…' : '保存设置'}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {/* 在线多模态模型（预留：图片理解） */}
-      {embedding ? (
-        <section className="settings-section">
-          <h3>在线多模态模型（图片理解 · 预留）</h3>
-          <p className="settings-value" style={{ margin: '0 0 10px', lineHeight: 1.7 }}>
-            为后续的图片内容理解（OCR 增强、图片自动描述）预留；本期可先配置保存。
-          </p>
-          <OnlineModelForm
-            conf={embedding.onlineMultimodal}
-            onChange={(patch) => setEmbedding({ ...embedding, onlineMultimodal: { ...embedding.onlineMultimodal, ...patch } })}
-            defaultModels={['qwen-vl-plus', 'glm-4v-flash', 'gpt-4o-mini']}
-          />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-            <button type="button" className="btn primary" onClick={() => void saveEmbedding()} disabled={saving}>
-              {saving ? '保存中…' : '保存设置'}
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {/* Newsletter / IMAP 邮件订阅 */}
-      <NewsletterSection />
-
-      {/* L3 平台账号 */}
-      <PlatformAccountsSection />
-
-      {/* 12.2：索引状态诊断 */}
-      <section className="settings-section">
-        <h3>索引状态</h3>
-        {stats ? (
-          <>
-            <div className="settings-row"><span>已索引 / 待处理</span><span className="settings-value">{stats.indexed} / {stats.pending}</span></div>
-            <div className="settings-row"><span>嵌入队列</span><span className="settings-value">{stats.queueSize === 0 ? '空闲' : `${stats.queueSize} 个任务`}</span></div>
-            <div className="settings-row"><span>全文索引（FTS5）</span><span className={stats.ftsRows >= 0 ? 'settings-value ok' : 'settings-value muted'}>{stats.ftsRows >= 0 ? `${stats.ftsRows} 条` : '不可用（回退 LIKE）'}</span></div>
-            <div className="settings-row"><span>文本模型</span><span className={stats.model.textReady ? 'settings-value ok' : 'settings-value muted'}>{stats.model.textReady ? '就绪' : '未就绪'}</span></div>
-            <div className="settings-row"><span>图片模型（CLIP）</span><span className={stats.model.imageReady ? 'settings-value ok' : 'settings-value muted'}>{stats.model.imageReady ? '就绪' : '未就绪'}</span></div>
-            {Object.keys(stats.byType).length > 0 ? (
-              <div className="settings-row"><span>内容分布</span>
-                <span className="settings-value">{Object.entries(stats.byType).map(([k, v]) => `${k}:${v}`).join(' · ')}</span>
-              </div>
-            ) : null}
-            {stats.recentErrors.length > 0 ? (
-              <div style={{ marginTop: 8 }}>
-                <div className="report-head">嵌入失败原因</div>
-                {stats.recentErrors.map((e) => (
-                  <div key={e.err} className="report-fail-row"><span>· {String(e.err).slice(0, 60)}</span><span className="report-fail-count">×{e.n}</span></div>
-                ))}
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <p className="settings-value">载入中…</p>
-        )}
-      </section>
-
-      {/* F05：数据导入导出 */}
-      <section className="settings-section">
-        <h3>数据导入 / 导出</h3>
-        <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 10 }}>
-          书签 HTML / OPML 订阅 / JSON 全量（收藏、标签、订阅、已读星标）。导出再导入不会重复放大数据。
+        <h3>外部解析服务（可选 · 推荐）</h3>
+        <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 12 }}>
+          小红书可一键启用内置引擎(应用自动下载 XHS-Downloader 并托管运行,导入与重抓自动走它);抖音自建服务后填地址。服务离线或解析失败自动回落内置解析。
         </p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="btn ghost" onClick={() => void onImport('bookmarks')}>导入浏览器书签…</button>
-          <button type="button" className="btn ghost" onClick={() => void onImport('opml')}>导入 OPML 订阅…</button>
-          <button type="button" className="btn ghost" onClick={() => void onImport('json')}>导入 JSON 备份…</button>
-          <button type="button" className="btn primary" onClick={() => void onExport()}>导出全部数据…</button>
+        <div className="settings-row">
+          <span>小红书 · 内置引擎（推荐）</span>
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {builtinError ? (
+              <span style={{ fontSize: 12, color: 'var(--danger)' }} title={builtinError}>
+                引擎状态不可用（{builtinError.slice(0, 40)}）· 完全重启应用后重试
+              </span>
+            ) : builtin ? (
+              <>
+                <span style={{ fontSize: 12, color: builtin.enabled ? (builtin.running ? 'var(--ok)' : 'var(--accent)') : 'var(--fg-faint)' }}>
+                  {builtin.enabled ? (builtin.running ? '● 运行中' : '● 已启用(待拉起)') : builtin.installed ? '○ 已安装·未启用' : '○ 未安装'}
+                </span>
+                <button type="button" className={`btn small ${builtin.enabled ? 'ghost' : 'primary'}`} disabled={builtinBusy} onClick={() => void toggleBuiltin()}>
+                  {builtinBusy ? '处理中…' : builtin.enabled ? '停用' : builtin.installed ? '启用' : '下载并启用（约 40MB）'}
+                </button>
+              </>
+            ) : (
+              <span style={{ fontSize: 12, color: 'var(--fg-faint)' }}>检测中…</span>
+            )}
+          </span>
+        </div>
+        <div className="settings-row">
+          <span>小红书 · 自定义服务地址（高级）</span>
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input className="settings-input" style={{ width: 240 }} placeholder="http://127.0.0.1:5556（留空跟随内置）" value={mpXhs} onChange={(e) => { setMpXhs(e.target.value); setMpResult({}) }} />
+            <button type="button" className="btn small ghost" disabled={!mpXhs.trim() || mpTesting !== null} onClick={() => void testMp('xhs')}>
+              {mpTesting === 'xhs' ? '测试中…' : '测试'}
+            </button>
+            {mpResult.xhs !== undefined ? <span className={mpResult.xhs ? 'settings-value ok' : ''} style={{ fontSize: 12 }}>{mpResult.xhs ? '在线' : '离线'}</span> : null}
+          </span>
+        </div>
+        <div className="settings-row">
+          <span>抖音 · Douyin_TikTok_Download_API</span>
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input className="settings-input" style={{ width: 240 }} placeholder="http://127.0.0.1:8080" value={mpDy} onChange={(e) => { setMpDy(e.target.value); setMpResult({}) }} />
+            <button type="button" className="btn small ghost" disabled={!mpDy.trim() || mpTesting !== null} onClick={() => void testMp('douyin')}>
+              {mpTesting === 'douyin' ? '测试中…' : '测试'}
+            </button>
+            {mpResult.douyin !== undefined ? <span className={mpResult.douyin ? 'settings-value ok' : ''} style={{ fontSize: 12 }}>{mpResult.douyin ? '在线' : '离线'}</span> : null}
+          </span>
+        </div>
+        <p style={{ color: 'var(--fg-faint)', fontSize: 12, lineHeight: 1.8, margin: '8px 0 10px' }}>
+          启动方式：XHS-Downloader 运行 <code>python main.py api</code>（默认端口 5556，Docker 同理）；抖音服务用 Docker：<code>docker run -d -p 8080:80 evil0ctal/douyin_tiktok_download_api</code>（需在其配置里填入抖音 Cookie）。
+        </p>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button type="button" className="btn primary" onClick={() => void saveMediaParser()}>保存服务地址</button>
         </div>
       </section>
+
+      {/* 功能设置 */}
+      {embedding ? (
+        <section className="settings-section">
+          <h3>功能设置</h3>
+          <div className="settings-row">
+            <span>在线请求并发数</span>
+            <input
+              className="settings-input" style={{ width: 100 }} type="number" min={1} max={16}
+              value={embedding.advanced.onlineConcurrency}
+              onChange={(e) => setAdvanced({ onlineConcurrency: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+            />
+          </div>
+          <div className="settings-row">
+            <span>在线超时（毫秒）</span>
+            <input
+              className="settings-input" style={{ width: 100 }} type="number" min={5000} step={1000}
+              value={embedding.advanced.timeoutMs}
+              onChange={(e) => setAdvanced({ timeoutMs: Math.max(5000, parseInt(e.target.value, 10) || 30000) })}
+            />
+          </div>
+          <div className="settings-row">
+            <span>向量写入批次大小</span>
+            <input
+              className="settings-input" style={{ width: 100 }} type="number" min={8} max={128}
+              value={embedding.advanced.batchSize}
+              onChange={(e) => setAdvanced({ batchSize: Math.max(8, parseInt(e.target.value, 10) || 32) })}
+            />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+            <button type="button" className="btn primary" onClick={() => void save()} disabled={saving}>
+              {saving ? '保存中…' : '保存设置'}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {/* 关于 */}
       <section className="settings-section">
         <h3>关于</h3>
         <p className="settings-value" style={{ lineHeight: 1.8 }}>
-          Oasis Documents v0.1.0 · 整理 / 检索 / 收藏 / 订阅
-          <br />视频语义检索（SentrySearch）已预留，本期未启用。
+          Oasis Documents · 本地优先的数字资产管理
+          <br />导入 / 整理 / 检索 / 收藏 / 系统状态
         </p>
       </section>
     </div>
-  )
-}
-
-/** 在线模型通用表单（LLM / 多模态共用） */
-function OnlineModelForm({
-  conf,
-  onChange,
-  defaultModels
-}: {
-  conf: OnlineModelConf
-  onChange: (patch: Partial<OnlineModelConf>) => void
-  defaultModels: string[]
-}): React.ReactNode {
-  return (
-    <>
-      <div className="settings-row">
-        <span>启用</span>
-        <button
-          type="button"
-          className={`btn small ${conf.enabled ? 'primary' : 'ghost'}`}
-          onClick={() => onChange({ enabled: !conf.enabled })}
-        >
-          {conf.enabled ? '已启用' : '未启用'}
-        </button>
-      </div>
-      <div className="settings-row">
-        <span>服务商</span>
-        <select
-          className="settings-select"
-          value={conf.provider}
-          onChange={(e) => onChange({ provider: e.target.value as OnlineModelConf['provider'] })}
-        >
-          <option value="zhipu">智谱（BigModel）</option>
-          <option value="qwen">通义（DashScope）</option>
-          <option value="openai">OpenAI</option>
-          <option value="custom">自定义（OpenAI 兼容）</option>
-        </select>
-      </div>
-      <div className="settings-row">
-        <span>API Key</span>
-        <input
-          className="settings-input"
-          style={{ width: 300 }}
-          type="password"
-          placeholder="sk-…"
-          value={conf.apiKey}
-          onChange={(e) => onChange({ apiKey: e.target.value })}
-        />
-      </div>
-      <div className="settings-row">
-        <span>模型</span>
-        <input
-          className="settings-input"
-          style={{ width: 300 }}
-          list={`models-${defaultModels[0]}`}
-          value={conf.model}
-          onChange={(e) => onChange({ model: e.target.value })}
-        />
-        <datalist id={`models-${defaultModels[0]}`}>
-          {defaultModels.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </div>
-      {conf.provider === 'custom' ? (
-        <div className="settings-row">
-          <span>Base URL</span>
-          <input
-            className="settings-input"
-            style={{ width: 300 }}
-            placeholder="https://your-host/v1"
-            value={conf.baseUrl ?? ''}
-            onChange={(e) => onChange({ baseUrl: e.target.value })}
-          />
-        </div>
-      ) : null}
-    </>
-  )
-}
-
-function ProviderForm({
-  embedding,
-  setProviderConf
-}: {
-  embedding: EmbeddingSettings
-  setProviderConf: (
-    key: 'openai' | 'zhipu' | 'qwen' | 'custom',
-    patch: Partial<EmbeddingSettings['providers']['openai']>
-  ) => void
-}): React.ReactNode {
-  const key = embedding.defaultProvider as 'openai' | 'zhipu' | 'qwen' | 'custom'
-  const conf = embedding.providers[key]
-
-  return (
-    <>
-      <div className="settings-row">
-        <span>API Key</span>
-        <input
-          className="settings-input"
-          style={{ width: 300 }}
-          type="password"
-          placeholder="sk-…（保存后加密存储）"
-          value={conf.apiKey}
-          onChange={(e) => setProviderConf(key, { apiKey: e.target.value, enabled: e.target.value.trim().length > 0 })}
-        />
-      </div>
-      <div className="settings-row">
-        <span>模型</span>
-        <input
-          className="settings-input"
-          style={{ width: 300 }}
-          value={conf.model}
-          onChange={(e) => setProviderConf(key, { model: e.target.value })}
-        />
-      </div>
-      {key === 'custom' ? (
-        <>
-          <div className="settings-row">
-            <span>Base URL（OpenAI 兼容）</span>
-            <input
-              className="settings-input"
-              style={{ width: 300 }}
-              placeholder="https://your-host/v1"
-              value={(conf as EmbeddingSettings['providers']['custom']).baseUrl}
-              onChange={(e) => setProviderConf('custom', { baseUrl: e.target.value } as Partial<EmbeddingSettings['providers']['openai']>)}
-            />
-          </div>
-          <div className="settings-row">
-            <span>向量维度</span>
-            <input
-              className="settings-input"
-              style={{ width: 120 }}
-              type="number"
-              value={(conf as EmbeddingSettings['providers']['custom']).dimensions || ''}
-              onChange={(e) =>
-                setProviderConf('custom', { dimensions: parseInt(e.target.value, 10) || 0 } as Partial<EmbeddingSettings['providers']['openai']>)
-              }
-            />
-          </div>
-        </>
-      ) : null}
-      <p style={{ color: 'var(--fg-faint)', fontSize: 12, margin: '8px 0 0' }}>
-        在线失败时自动降级本地模型（若已下载）。API Key 通过系统钥匙串加密。
-      </p>
-    </>
-  )
-}
-
-
-/* ============ Newsletter / IMAP 配置 ============ */
-function NewsletterSection(): React.ReactNode {
-  const [conf, setConf] = useState<Awaited<ReturnType<typeof window.oasis.newsletter.conf>> | null>(null)
-  const [host, setHost] = useState('')
-  const [user, setUser] = useState('')
-  const [password, setPassword] = useState('')
-  const [filters, setFilters] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    void window.oasis.newsletter.conf().then((c) => {
-      setConf(c)
-      setHost(c.host)
-      setUser(c.user)
-      setFilters(c.fromFilters.join(', '))
-    })
-  }, [])
-
-  const save = async (enabled?: boolean): Promise<void> => {
-    setBusy(true)
-    try {
-      await window.oasis.newsletter.save({
-        enabled: enabled ?? conf?.enabled,
-        host,
-        user,
-        ...(password ? { password } : {}),
-        fromFilters: filters.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
-      })
-      setPassword('')
-      const c = await window.oasis.newsletter.conf()
-      setConf(c)
-      useUiStore.getState().showToast('邮件订阅配置已保存')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const syncNow = async (): Promise<void> => {
-    setBusy(true)
-    try {
-      const r = await window.oasis.newsletter.sync()
-      if (r.error) useUiStore.getState().showToast(`拉取失败：${r.error}`, 'error')
-      else useUiStore.getState().showToast(`拉取 ${r.fetched} 封，归档 ${r.archived} 封`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (!conf) return null
-  return (
-    <section className="settings-section">
-      <h3>邮件订阅（IMAP 归档）</h3>
-      <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 10 }}>
-        定时拉取邮箱订阅邮件，正文进入统一检索。密码经系统钥匙串加密，仅用于 IMAP 登录。
-      </p>
-      <div className="settings-row"><span>启用</span>
-        <button type="button" className={`btn small ${conf.enabled ? 'primary' : 'ghost'}`} disabled={busy} onClick={() => void save(!conf.enabled)}>
-          {conf.enabled ? '已启用' : '未启用'}
-        </button>
-      </div>
-      <div className="settings-row"><span>IMAP 服务器</span>
-        <input className="settings-input" style={{ width: 260 }} placeholder="imap.qq.com" value={host} onChange={(e) => setHost(e.target.value)} />
-      </div>
-      <div className="settings-row"><span>账号</span>
-        <input className="settings-input" style={{ width: 260 }} value={user} onChange={(e) => setUser(e.target.value)} />
-      </div>
-      <div className="settings-row"><span>{conf.passwordConfigured ? '密码（已配置，留空不修改）' : '密码 / 授权码'}</span>
-        <input className="settings-input" style={{ width: 260 }} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-      </div>
-      <div className="settings-row"><span>发件人过滤（逗号分隔，空=全部）</span>
-        <input className="settings-input" style={{ width: 260 }} placeholder="newsletter, 周刊" value={filters} onChange={(e) => setFilters(e.target.value)} />
-      </div>
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 10 }}>
-        <button type="button" className="btn ghost" onClick={() => void syncNow()} disabled={busy || !conf.enabled}>立即拉取</button>
-        <button type="button" className="btn primary" onClick={() => void save()} disabled={busy}>保存</button>
-      </div>
-    </section>
-  )
-}
-
-/* ============ L3 平台账号 ============ */
-function PlatformAccountsSection(): React.ReactNode {
-  const [accounts, setAccounts] = useState<Awaited<ReturnType<typeof window.oasis.accounts.list>>>([])
-  const [mpName, setMpName] = useState('')
-
-  useEffect(() => {
-    void window.oasis.accounts.list().then(setAccounts)
-  }, [])
-
-  return (
-    <section className="settings-section">
-      <h3>平台账号（L3）</h3>
-      <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 10 }}>
-        登录态保存在独立持久会话中（不与主窗口共享）。仅承载登录与手动同步；
-        <b style={{ color: 'var(--danger)' }}>频繁自动抓取有封号风险</b>，本应用不做后台自动爬取。
-      </p>
-      {accounts.map((a) => (
-        <div key={a.id} className="settings-row">
-          <span>{a.label}</span>
-          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {a.lastAction ? <span className="settings-value muted">{new Date(a.lastAction).toLocaleDateString('zh-CN')} 活动过</span> : null}
-            <button type="button" className="btn small ghost" onClick={async () => {
-              await window.oasis.accounts.login(a.id)
-              setAccounts(await window.oasis.accounts.list())
-            }}>打开登录窗口</button>
-          </span>
-        </div>
-      ))}
-      <div className="settings-row" style={{ marginTop: 6 }}>
-        <span>订阅公众号（RSSHub 桥接，无需微信登录）</span>
-        <span style={{ display: 'flex', gap: 8 }}>
-          <input className="settings-input" style={{ width: 180 }} placeholder="公众号名称" value={mpName} onChange={(e) => setMpName(e.target.value)} />
-          <button type="button" className="btn small primary" disabled={!mpName.trim()} onClick={async () => {
-            try {
-              await window.oasis.accounts.subscribeMp(mpName.trim())
-              useUiStore.getState().showToast(`已订阅公众号「${mpName.trim()}」，文章将出现在订阅时间线`)
-              setMpName('')
-            } catch (e) {
-              useUiStore.getState().showToast(`订阅失败：${e instanceof Error ? e.message : e}`, 'error')
-            }
-          }}>订阅</button>
-        </span>
-      </div>
-    </section>
   )
 }

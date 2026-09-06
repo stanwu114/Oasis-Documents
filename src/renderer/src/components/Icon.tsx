@@ -15,6 +15,7 @@ const PATHS: Record<string, string> = {
   plus: 'M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z',
   undo: 'M9 14l-5-5 5-5 M4 9h10a6 6 0 010 12h-3',
   folder: 'M3 6h6l2 2h10v11H3V6z',
+  gauge: 'M12 20a8 8 0 110-16 8 8 0 010 16zm0-2a6 6 0 100-12 6 6 0 000 12zm0-2a4 4 0 110-8 4 4 0 010 8zm0-2.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM15.5 8.5l-2.6 3.6',
   close: 'M6 6l12 12M18 6L6 18'
 }
 

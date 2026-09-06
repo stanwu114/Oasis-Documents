@@ -15,6 +15,7 @@ const CRED_FIELDS = [
   'providers.zhipu.apiKey',
   'providers.qwen.apiKey',
   'providers.custom.apiKey',
+  'onlineProvider.apiKey',
   'onlineLlm.apiKey',
   'onlineMultimodal.apiKey'
 ] as const
@@ -42,7 +43,8 @@ function getCred(s: EmbeddingSettings, path: string): string {
   if (a === 'providers') {
     return ((s.providers as unknown as Record<string, Record<string, string>>)[b] ?? {})[c] ?? ''
   }
-  return (s[a as 'onlineLlm' | 'onlineMultimodal'] as { apiKey?: string }).apiKey ?? ''
+  const twoLevel = s[a as 'onlineProvider' | 'onlineLlm' | 'onlineMultimodal'] as { apiKey?: string } | undefined
+  return twoLevel?.apiKey ?? ''
 }
 
 function setCred(s: EmbeddingSettings, path: string, v: string): void {
@@ -50,7 +52,8 @@ function setCred(s: EmbeddingSettings, path: string, v: string): void {
   if (a === 'providers') {
     ;(s.providers as unknown as Record<string, Record<string, string>>)[b][c] = v
   } else {
-    ;(s[a as 'onlineLlm' | 'onlineMultimodal'] as { apiKey?: string }).apiKey = v
+    const conf = s[a as 'onlineProvider' | 'onlineLlm' | 'onlineMultimodal'] as { apiKey?: string } | undefined
+    if (conf) conf.apiKey = v
   }
 }
 

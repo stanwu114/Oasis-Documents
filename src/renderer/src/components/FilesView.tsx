@@ -54,33 +54,29 @@ export function FilesView(): React.ReactNode {
   const [rows, setRows] = useState<ContentRow[]>([])
   const [total, setTotal] = useState(0)
   const [counts, setCounts] = useState<Record<string, number>>({})
-  const [hasMore, setHasMore] = useState(false)
-  const [loading, setLoading] = useState(false)
   const [tab, setTab] = useState<Tab>('all')
 
-  const PAGE = 500
+  /* 一次性拉全量(不做分页),上限由后端钳制 */
+  const LIST_LIMIT = 10000
 
-  const load = async (mode: 'reset' | 'more'): Promise<void> => {
-    setLoading(true)
+  const load = async (): Promise<void> => {
     try {
       const res = await window.oasis.files.list(undefined, {
-        offset: mode === 'more' ? rows.length : 0,
-        limit: PAGE,
+        offset: 0,
+        limit: LIST_LIMIT,
         dir: currentDir ?? undefined,
         category: tab === 'all' ? undefined : tab
       })
-      const mapped = res.rows as ContentRow[]
-      setRows(mode === 'more' ? [...rows, ...mapped] : mapped)
+      setRows(res.rows as ContentRow[])
       setTotal(res.total)
-      setHasMore(res.hasMore)
       setCounts(res.counts)
-    } finally {
-      setLoading(false)
+    } catch {
+      /* 拉取失败保留现有列表 */
     }
   }
 
   useEffect(() => {
-    void load('reset')
+    void load()
     /* contentsVersion 变化或目录/分类切换时按新范围重拉 */
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [contentsVersion, currentDir, tab])
@@ -204,15 +200,6 @@ export function FilesView(): React.ReactNode {
         <div className="search-results-empty">
           <Icon name="files" size={28} />
           <p>{rows.length === 0 ? '暂无内容，导入文件夹后自动入库' : '该分类下暂无文件'}</p>
-        </div>
-      ) : null}
-
-      {/* 分页加载 */}
-      {hasMore ? (
-        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
-          <button type="button" className="btn ghost" onClick={() => void load('more')} disabled={loading}>
-            {loading ? '加载中…' : `加载更多（已显示 ${rows.length} / 共 ${total} 条）`}
-          </button>
         </div>
       ) : null}
     </div>

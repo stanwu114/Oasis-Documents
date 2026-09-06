@@ -51,29 +51,6 @@ export interface PlatformListRow {
   created_at: number
 }
 
-export interface SubListRow {
-  id: number
-  kind: string
-  title: string
-  feed_url: string
-  site_url: string
-  unread: number
-  last_fetch: number | null
-  enabled: number
-}
-
-export interface FeedItemRow {
-  id: string
-  subscription_id: number
-  title: string
-  url: string
-  author: string | null
-  summary: string
-  published_at: number
-  read: number
-  starred: number
-}
-
 export interface WatchTreeRow {
   watchPath: string
   name: string
@@ -132,6 +109,43 @@ export interface OnlineModelConf {
   baseUrl?: string
 }
 
+/* 统一在线服务商配置(百炼/智谱/自定义 OpenAI 兼容) */
+export interface OnlineProviderConf {
+  provider: 'bailian' | 'zhipu' | 'custom'
+  apiKey: string
+  /** custom 必填;内置服务商有默认值 */
+  baseUrl: string
+}
+
+/* 按类别指派的在线模型(id 来自服务商模型列表) */
+export interface ModelAssignments {
+  /** 向量模型(文本语义检索) */
+  embedding?: string
+  /** 文本模型(LLM:AI 打标等) */
+  text?: string
+  /** 多模态模型(图片理解) */
+  multimodal?: string
+  /** 音频模型(预留) */
+  audio?: string
+}
+
+/* 系统状态页总览 */
+export interface SystemStatus {
+  importedFiles: number
+  pendingImport: number
+  embedded: number
+  pendingEmbed: number
+  importFails: { name: string; reason: string }[]
+  embedFails: { name: string; reason: string }[]
+  models: {
+    textEmbedding: string
+    imageEmbedding: string
+    textLlm: string
+    multimodal: string
+    audio: string
+  }
+}
+
 export interface EmbeddingSettings {
   defaultProvider: 'local' | 'openai' | 'zhipu' | 'qwen' | 'custom'
   local: {
@@ -144,6 +158,9 @@ export interface EmbeddingSettings {
     qwen: { enabled: boolean; apiKey: string; model: string }
     custom: { enabled: boolean; apiKey: string; model: string; baseUrl: string; dimensions: number }
   }
+  /* 统一在线模型服务商接入(设置页):一份 Key 拉取模型列表后按类指派 */
+  onlineProvider?: OnlineProviderConf
+  modelAssignments?: ModelAssignments
   /* 在线文本模型（LLM）：文档 AI 打标等 */
   onlineLlm: OnlineModelConf
   /* 在线多模态模型：图片理解（预留，OCR 增强/图片描述） */
@@ -226,9 +243,10 @@ export interface ImportProgress {
 export interface OasisAPI {
   /* 内容检索 */
   search: {
-    query(text: string, options?: { limit?: number; filters?: string[] }): Promise<SearchResult[]>
+    /** 以文搜文:type 缺省 'document'——搜索对象仅文档,图片/收藏/RSS 不掺入 */
+    query(text: string, options?: { limit?: number; filters?: string[]; type?: 'all' | 'document' }): Promise<SearchResult[]>
     queryImage(imagePath: string, options?: { limit?: number }): Promise<SearchResult[]>
-    /** 以文搜图：查询文本经 CLIP 文本编码器在图片空间检索（R18 通道） */
+    /** 以文搜图：查询文本经 CLIP 文本编码器在图片空间检索（R18 通道,仅图片） */
     imagesByText(text: string, limit?: number): Promise<SearchResult[]>
     /** 以图搜图：查询图入媒体目录，返回可显示的协议 URL */
     stageQueryImage(path: string): Promise<string | null>
@@ -316,21 +334,26 @@ export interface OasisAPI {
 
   /* 平台收藏（L1 链接导入） */
   platform: {
-    importLink(url: string): Promise<{ platform: string; title: string; created: boolean; id: string }>
+    importLink(url: string): Promise<{ platform: string; title: string; created: boolean; id: string; images: number; video: boolean }>
     listPlugins(): Promise<{ id: string; label: string }[]>
     listContents(): Promise<PlatformListRow[]>
+    /** 删除一条收藏(仅 webpage 类型):行/笔记/FTS/向量/缩略图级联清理 */
+    remove(id: string): Promise<{ removed: boolean }>
+    /** 重新抓取图文:全量下载图片/视频到本地并更新正文(保留标签) */
+    refresh(id: string): Promise<{ ok: boolean; images: number; video: boolean }>
+    /** 外部解析服务配置(XHS-Downloader / Douyin_TikTok_Download_API,可选) */
+    mediaParser: {
+      get(): Promise<{ xhs?: string; douyin?: string; builtinXhs?: boolean }>
+      set(conf: { xhs?: string; douyin?: string; builtinXhs?: boolean }): Promise<void>
+      test(base: string): Promise<boolean>
+      /** 内置小红书引擎(XHS-Downloader,应用托管) */
+      builtin: {
+        status(): Promise<{ installed: boolean; running: boolean; enabled: boolean }>
+        enable(): Promise<boolean>
+        disable(): Promise<void>
+      }
+    }
     retag(): Promise<number>
-  }
-
-  /* 订阅时间线（RSS/Atom） */
-  subs: {
-    add(url: string): Promise<{ id: number; title: string; siteUrl: string }>
-    list(): Promise<SubListRow[]>
-    remove(id: number): Promise<void>
-    refresh(id?: number): Promise<number | null>
-    items(opts?: { subId?: number; onlyUnread?: boolean; limit?: number }): Promise<FeedItemRow[]>
-    markRead(itemId: string, read: boolean): Promise<void>
-    star(itemId: string, starred: boolean): Promise<void>
   }
 
   /* F03：笔记与划线 */
@@ -341,54 +364,6 @@ export interface OasisAPI {
     remove(id: number): Promise<void>
   }
 
-  /* F05：批量导入导出 */
-  io: {
-    importBookmarks(html: string): Promise<{ added: number; failed: number }>
-    importOpml(xml: string): Promise<{ added: number; failed: number }>
-    importJson(json: string): Promise<{ contents: number; subscriptions: number }>
-    exportJson(): Promise<string>
-    pickOpenFile(extensions: string[]): Promise<string | null>
-    pickSaveFile(defaultName: string): Promise<string | null>
-    readFile(path: string): Promise<string>
-    writeFile(path: string, content: string): Promise<void>
-  }
-
-  /* Newsletter / IMAP（后置能力） */
-  newsletter: {
-    conf(): Promise<{
-      enabled: boolean
-      host: string
-      port: number
-      user: string
-      passwordRef: string
-      tls: boolean
-      fromFilters: string[]
-      passwordConfigured: boolean
-    }>
-    save(input: { enabled?: boolean; host?: string; port?: number; user?: string; password?: string; tls?: boolean; fromFilters?: string[] }): Promise<void>
-    sync(): Promise<{ fetched: number; archived: number; error?: string }>
-  }
-
-  /* L3 平台账号 */
-  accounts: {
-    list(): Promise<{ id: string; label: string; lastAction: number | null }[]>
-    login(id: string): Promise<boolean>
-    subscribeMp(name: string, rsshubBase?: string): Promise<{ id: number; feedUrl: string }>
-  }
-
-  /* 12.2：索引状态诊断 */
-  diag: {
-    indexStats(): Promise<{
-      pending: number
-      indexed: number
-      byType: Record<string, number>
-      queueSize: number
-      ftsRows: number
-      recentErrors: { err: string; n: number }[]
-      model: { textReady: boolean; imageReady: boolean }
-    }>
-  }
-
   /* 导入进度轮询（事件推送的兜底通道） */
   importStatus(): Promise<ImportProgress>
 
@@ -396,6 +371,19 @@ export interface OasisAPI {
   models: {
     status(): Promise<ModelStatus[]>
     download(name: string): Promise<void>
+  }
+
+  /* 系统状态页 */
+  status: {
+    overview(): Promise<SystemStatus>
+  }
+
+  /* 在线模型服务商接入 */
+  llm: {
+    /** 测试连通并拉取模型列表(按名称启发式给出类别建议) */
+    testProvider(input: { provider: 'bailian' | 'zhipu' | 'custom'; apiKey: string; baseUrl?: string }): Promise<
+      { ok: true; models: { id: string; category: 'embedding' | 'text' | 'multimodal' | 'audio' | 'other' }[] } | { ok: false; error: string }
+    >
   }
 
   /* 事件订阅 */

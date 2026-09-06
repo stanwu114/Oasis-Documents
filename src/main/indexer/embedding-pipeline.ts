@@ -1,6 +1,6 @@
 import { getDb } from '../db'
-import { addVectors, deleteVectors, type VectorTable } from '../lancedb'
-import { embedTextsSafe, embedImages, embedderReadiness } from '../embedder'
+import { addVectors, deleteVectors, ensureVectorSpace, type VectorTable } from '../lancedb'
+import { embedTextsSafe, embedImages, embedderReadiness, activeImageVectorSpace } from '../embedder'
 import type { FileCategory } from '../../shared/classify'
 import type { ExtractResult } from './extractor'
 
@@ -247,6 +247,12 @@ async function runJob(job: Job): Promise<void> {
         return
       }
       const vectors = await withTimeout(embedImages([job.payload]), 60_000)
+      /* 向量空间身份校验:中英 CLIP 切换后旧空间向量不兼容(同 512 维,
+         维度守卫抓不住)→ drop 表重建,全部图片标记待重嵌。
+         本任务的向量随后写入新空间表,历史图片由补扫收敛 */
+      if (await ensureVectorSpace('image_vectors', activeImageVectorSpace())) {
+        db.prepare(`UPDATE contents SET needs_reindex = 1 WHERE type = 'image' AND source_path IS NOT NULL`).run()
+      }
       bufferWrite('image_vectors', [
         {
           id: `${job.contentId}:img`,

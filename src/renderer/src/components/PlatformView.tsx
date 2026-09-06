@@ -3,6 +3,7 @@ import { Icon } from './Icon'
 import { useUiStore } from '../stores/uiStore'
 import { toMediaUrl } from '../lib/media'
 import { MasonryGrid } from './MasonryGrid'
+import { platformLabel } from '../../../shared/platform'
 
 interface PlatformRow {
   id: string
@@ -16,13 +17,6 @@ interface PlatformRow {
   created_at: number
 }
 
-const PLATFORM_LABEL: Record<string, string> = {
-  xiaohongshu: '小红书',
-  douyin: '抖音',
-  'wechat-mp': '公众号',
-  csdn: 'CSDN'
-}
-
 function fmtDate(ts: number): string {
   const d = new Date(ts)
   return `${d.getMonth() + 1}月${d.getDate()}日`
@@ -34,6 +28,7 @@ export function PlatformView(): React.ReactNode {
   const [retagging, setRetagging] = useState(false)
   const [rows, setRows] = useState<PlatformRow[]>([])
   const [activeTag, setActiveTag] = useState<string | null>(null)
+  const collectionPlatform = useUiStore((s) => s.collectionPlatform)
 
   useEffect(() => {
     void load()
@@ -49,13 +44,39 @@ export function PlatformView(): React.ReactNode {
     setImporting(true)
     try {
       const r = await window.oasis.platform.importLink(u)
-      useUiStore.getState().showToast(r.created ? `已导入「${r.title}」并完成 AI 打标` : '该链接已在收藏中')
+      if (r.images > 0 || r.video) {
+        useUiStore.getState().showToast(
+          `${r.created ? '已导入' : '已更新'}「${r.title}」· ${r.images} 张图${r.video ? ' · 含视频' : ''}`
+        )
+      } else {
+        /* 空图文可见化:给出可执行的下一步,而不是静默成功 */
+        useUiStore.getState().showToast(
+          `已保存「${r.title}」,但未抓到图文(可能被风控)。建议:设置 → 启用内置小红书引擎后,详情页点「重新抓取图文」`,
+          'error'
+        )
+      }
       setUrl('')
       await load()
     } catch (e) {
       useUiStore.getState().showToast(`导入失败：${e instanceof Error ? e.message : e}`, 'error')
     } finally {
       setImporting(false)
+    }
+  }
+
+  /* 删除收藏:行/笔记/FTS/向量/缩略图级联清理 */
+  const onRemove = async (id: string, title: string): Promise<void> => {
+    const ok = window.confirm(`删除收藏「${title.slice(0, 40)}」？\n\n正文、标签、笔记与本地缩略图将一起删除，不可恢复。`)
+    if (!ok) return
+    try {
+      const r = await window.oasis.platform.remove(id)
+      if (r.removed) {
+        useUiStore.getState().showToast('已删除')
+        await load()
+        useUiStore.getState().bumpContents() /* 侧栏平台分组计数同步刷新 */
+      }
+    } catch (e) {
+      useUiStore.getState().showToast(`删除失败：${e instanceof Error ? e.message : e}`, 'error')
     }
   }
 
@@ -70,20 +91,28 @@ export function PlatformView(): React.ReactNode {
     }
   }
 
-  /* 全量标签云（点击过滤） */
-  const tagCloud = [...new Set(rows.flatMap((r) => r.tags))].slice(0, 30)
-  const filtered = activeTag ? rows.filter((r) => r.tags.includes(activeTag)) : rows
+  /* 平台过滤(侧栏"我的收藏"二级目录) + 标签过滤 */
+  const platformFiltered = collectionPlatform ? rows.filter((r) => r.platform === collectionPlatform) : rows
+  const tagCloud = [...new Set(platformFiltered.flatMap((r) => r.tags))].slice(0, 30)
+  const filtered = activeTag ? platformFiltered.filter((r) => r.tags.includes(activeTag)) : platformFiltered
 
   return (
     <div className="platform-view">
       <div className="platform-head">
         <div>
-          <h1 className="view-title">平台收藏</h1>
+          <h1 className="view-title">
+            {collectionPlatform ? `我的收藏 · ${platformLabel(collectionPlatform)}` : '我的收藏'}
+          </h1>
           <p className="view-sub" style={{ marginBottom: 0 }}>
-            粘贴小红书 / 抖音 / 公众号 / CSDN 分享链接 · 导入时自动 AI 打标
+            粘贴小红书 / 抖音 / 微信 / CSDN 分享链接 · 导入时自动 AI 打标
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          {collectionPlatform ? (
+            <button type="button" className="btn ghost" onClick={() => useUiStore.getState().openCollection(null)}>
+              ← 全部平台
+            </button>
+          ) : null}
           <button type="button" className="btn ghost" onClick={() => void onRetag()} disabled={retagging || rows.length === 0}>
             {retagging ? '打标中…' : '重新 AI 打标'}
           </button>
@@ -111,7 +140,7 @@ export function PlatformView(): React.ReactNode {
             className={`tag-chip${activeTag === null ? ' on' : ''}`}
             onClick={() => setActiveTag(null)}
           >
-            全部 {rows.length}
+            全部 {platformFiltered.length}
           </button>
           {tagCloud.map((t) => (
             <button key={t} type="button" className={`tag-chip${activeTag === t ? ' on' : ''}`} onClick={() => setActiveTag(activeTag === t ? null : t)}>
@@ -128,6 +157,8 @@ export function PlatformView(): React.ReactNode {
           render={(_it, onImageLoad, style) => {
             const r = filtered.find((x) => x.id === _it.key)
             if (!r) return null
+            /* 本地缩略图优先;缺失时回退收藏时抓到的原图列表第一张 */
+            const cover = r.thumbnail_path ? toMediaUrl(r.thumbnail_path) : (r.image_urls[0] ?? undefined)
             return (
               <a
                 key={r.id}
@@ -142,10 +173,10 @@ export function PlatformView(): React.ReactNode {
                   useUiStore.getState().openDetail(r.id)
                 }}
               >
-                <div className={`note-card-cover ${r.thumbnail_path ? '' : 'placeholder'}`}>
-                  {r.thumbnail_path ? (
+                <div className={`note-card-cover ${cover ? '' : 'placeholder'}`}>
+                  {cover ? (
                     <img
-                      src={toMediaUrl(r.thumbnail_path) ?? undefined}
+                      src={cover}
                       alt={r.title}
                       loading="lazy"
                       data-mkey={r.id}
@@ -154,21 +185,32 @@ export function PlatformView(): React.ReactNode {
                   ) : (
                     <span className="note-card-cover-platform">
                       <Icon name="doc" size={26} />
-                      <em>{PLATFORM_LABEL[r.platform] ?? r.platform}</em>
+                      <em>{platformLabel(r.platform)}</em>
                     </span>
                   )}
-                  <span className="note-card-badge">{PLATFORM_LABEL[r.platform] ?? r.platform}</span>
+                  <span className="note-card-badge">{platformLabel(r.platform)}</span>
                 </div>
+                <button
+                  type="button"
+                  className="note-card-del"
+                  title="删除这条收藏"
+                  onClick={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    void onRemove(r.id, r.title)
+                  }}
+                >
+                  ✕
+                </button>
                 <div className="note-card-body">
                   <span className="note-card-title">{r.title}</span>
                   {r.snippet ? <span className="note-card-desc">{r.snippet}</span> : null}
-                  {r.tags.length > 0 ? (
-                    <div className="note-card-tags">
-                      {r.tags.slice(0, 4).map((t) => (
-                        <span key={t} className="note-tag">#{t}</span>
-                      ))}
-                    </div>
-                  ) : null}
+                  <div className="note-card-tags">
+                    <span className="note-tag-src" title="来源平台">{platformLabel(r.platform)}</span>
+                    {r.tags.slice(0, 4).map((t) => (
+                      <span key={t} className="note-tag">#{t}</span>
+                    ))}
+                  </div>
                   <span className="note-card-meta">{fmtDate(r.created_at)}</span>
                 </div>
               </a>
@@ -178,7 +220,7 @@ export function PlatformView(): React.ReactNode {
       ) : (
         <div className="search-results-empty">
           <Icon name="doc" size={28} />
-          <p>{rows.length === 0 ? '还没有平台收藏，粘贴链接开始导入' : '该标签下暂无内容'}</p>
+          <p>{rows.length === 0 ? '还没有收藏，粘贴链接开始导入' : '该平台/标签下暂无内容'}</p>
         </div>
       )}
     </div>

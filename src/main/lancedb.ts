@@ -1,5 +1,6 @@
 import * as lancedb from '@lancedb/lancedb'
 import { getVectorDbPath } from './dataLocation'
+import { getDb } from './db'
 
 /* ================================================================
    LanceDB 向量存储（嵌入式，零服务进程）
@@ -24,6 +25,44 @@ export async function getLanceDb(): Promise<lancedb.Connection> {
 }
 
 const writeLocks = new Map<VectorTable, Promise<unknown>>()
+
+/**
+ * 向量空间身份校验(R12 维度守卫的补全):settings 里记录每张表所属空间。
+ * 空间不兼容(中英 CLIP 切换:同为 512 维但语义空间不同,R12 的维度检查
+ * 抓不住这种情况)→ drop 表重建。向量是可重建的派生数据,调用方检测到
+ * 返回 true 后应标记 needs_reindex 全量补嵌(R16 同款补偿)。
+ * @returns 是否发生了空间切换(表已重建)
+ */
+export async function ensureVectorSpace(table: VectorTable, space: string): Promise<boolean> {
+  const key = `vector_space:${table}`
+  const db = getDb()
+  const read = () =>
+    db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined
+  const write = (v: string) =>
+    db.prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+    ).run(key, v)
+
+  /* 无记录的存量库默认视为旧英文 CLIP 空间(升级用户)——
+     否则首次写中文向量会漏掉 drop,造成中英向量混写 */
+  const LEGACY = 'clip-vit-b32-en'
+  const current = read()?.value ?? LEGACY
+  if (current === space) {
+    if (!read()) write(space) /* 首次记录当前空间 */
+    return false
+  }
+  return withWriteLock(table, async () => {
+    const cur = read()?.value ?? LEGACY /* 锁内复查,防并发双切 */
+    if (cur === space) return false
+    const conn = await getLanceDb()
+    const names = await conn.tableNames()
+    if (names.includes(table)) await conn.dropTable(table)
+    write(space)
+    console.warn(`[lancedb] 向量空间切换 ${cur} → ${space}，${table} 重建，历史向量待补嵌`)
+    return true
+  })
+}
 
 function withWriteLock<T>(table: VectorTable, task: () => Promise<T>): Promise<T> {
   const prev = writeLocks.get(table) ?? Promise.resolve()
@@ -90,21 +129,25 @@ export async function addVectors(
   })
 }
 
-/** 向量检索 → { contentId, score }（score = 1 - distance，越大越相关） */
+/** 向量检索 → { contentId, distance }（按距离升序；原始距离直接返回，
+    余弦换算与相关性下限由检索层 search-scoring 统一处理）。
+    where: 可选 SQL 过滤(如 content_type = 'document'),在向量检索时同步收窄候选集 */
 export async function searchVectors(
   tableName: VectorTable,
   queryVector: number[],
-  limit = 20
-): Promise<{ contentId: string; score: number }[]> {
+  limit = 20,
+  where?: string
+): Promise<{ contentId: string; distance: number }[]> {
   const db = await getLanceDb()
   const names = await db.tableNames()
   if (!names.includes(tableName)) return []
 
   const table = await db.openTable(tableName)
-  const rows = (await table.search(queryVector).limit(limit).toArray()) as Record<string, unknown>[]
+  const base = table.search(queryVector)
+  const rows = (await (where ? base.where(where) : base).limit(limit).toArray()) as Record<string, unknown>[]
   return rows.map((r) => ({
     contentId: String(r.content_id ?? r.id ?? ''),
-    score: 1 - Number(r._distance ?? 0)
+    distance: Number(r._distance ?? 0)
   }))
 }
 

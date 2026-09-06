@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { SearchResult, ImportProgress } from '../../../shared/ipc'
 
 export type Theme = 'light' | 'dark'
-export type View = 'home' | 'files' | 'organize' | 'search' | 'platform' | 'subscriptions' | 'settings'
+export type View = 'home' | 'files' | 'organize' | 'search' | 'platform' | 'status' | 'settings'
 
 interface UiState {
   view: View
@@ -13,6 +13,8 @@ interface UiState {
   toastKind: 'info' | 'error'
   /** 我的文件：当前过滤的目录（null = 全部） */
   currentDir: string | null
+  /** 我的收藏：当前过滤的平台（null = 全部平台） */
+  collectionPlatform: string | null
   /** F01/F03：详情/阅读模态目标 id（null 关闭） */
   detailId: string | null
   /** 导入会话进度（弹窗隐藏后侧栏文件夹仍实时显示） */
@@ -26,6 +28,7 @@ interface UiState {
 
   setView(v: View): void
   openDir(path: string | null): void
+  openCollection(platform: string | null): void
   openDetail(id: string | null): void
   setImportProgress(p: ImportProgress | null): void
   setImportDoneReport(p: ImportProgress | null): void
@@ -55,6 +58,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   toast: null,
   toastKind: 'info',
   currentDir: null,
+  collectionPlatform: null,
   detailId: null,
   importProgress: null,
   importDoneReport: null,
@@ -63,6 +67,7 @@ export const useUiStore = create<UiState>((set, get) => ({
 
   setView: (v) => set({ view: v }),
   openDir: (path) => set({ currentDir: path, view: 'files' }),
+  openCollection: (platform) => set({ collectionPlatform: platform, view: 'platform' }),
   openDetail: (id) => set({ detailId: id }),
   setImportProgress: (p) => set({ importProgress: p }),
   setImportDoneReport: (p) => set({ importDoneReport: p }),
