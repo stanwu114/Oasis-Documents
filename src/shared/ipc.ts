@@ -176,6 +176,7 @@ export interface SearchResult {
   snippet: string
   type: ContentItem['type']
   sourcePath?: string
+  thumbnailPath?: string
   url?: string
   score: number
   createdAt: number
@@ -229,6 +230,8 @@ export interface OasisAPI {
     queryImage(imagePath: string, options?: { limit?: number }): Promise<SearchResult[]>
     /** 以文搜图：查询文本经 CLIP 文本编码器在图片空间检索（R18 通道） */
     imagesByText(text: string, limit?: number): Promise<SearchResult[]>
+    /** 以图搜图：查询图入媒体目录，返回可显示的协议 URL */
+    stageQueryImage(path: string): Promise<string | null>
   }
 
   /* 视频检索（SentrySearch sidecar） */

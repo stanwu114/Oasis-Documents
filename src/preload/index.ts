@@ -5,7 +5,8 @@ const api: OasisAPI = {
   search: {
     query: (text, options) => ipcRenderer.invoke('search:query', text, options),
     queryImage: (imagePath, options) => ipcRenderer.invoke('search:queryImage', imagePath, options),
-    imagesByText: (text, limit) => ipcRenderer.invoke('search:imagesByText', text, limit)
+    imagesByText: (text, limit) => ipcRenderer.invoke('search:imagesByText', text, limit),
+    stageQueryImage: (path) => ipcRenderer.invoke('search:stageQueryImage', path)
   },
   video: {
     init: (params) => ipcRenderer.invoke('video:init', params),

@@ -1,4 +1,5 @@
 import { ipcMain, safeStorage, shell, BrowserWindow, dialog } from 'electron'
+import { join } from 'node:path'
 import { getDb } from './db'
 import {
   scanAndHash,
@@ -434,6 +435,25 @@ function registerSearchIpc(): void {
   )
 
   ipcMain.handle('search:embedderStatus', () => embedderStatus())
+
+  /* 以图搜图：查询图复制进媒体目录（raw 协议白名单内），返回可显示 URL */
+  ipcMain.handle('search:stageQueryImage', async (_e, srcPath: string): Promise<string | null> => {
+    try {
+      const { copyFile, mkdir } = await import('node:fs/promises')
+      const { createHash } = await import('node:crypto')
+      const { getMediaDir } = await import('./dataLocation')
+      const dir = join(getMediaDir(), 'search-uploads')
+      await mkdir(dir, { recursive: true })
+      const { readFile } = await import('node:fs/promises')
+      const buf = await readFile(srcPath)
+      const name = `${createHash('sha1').update(buf).digest('hex').slice(0, 16)}${srcPath.slice(srcPath.lastIndexOf('.'))}`
+      const dest = join(dir, name)
+      await copyFile(srcPath, dest)
+      return `oasis-media://media/search-uploads/${name}`
+    } catch {
+      return null
+    }
+  })
 }
 
 /* ---- 导入进度（事件推送 + 轮询双通道，UI 收敛不依赖单点） ---- */

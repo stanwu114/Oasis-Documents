@@ -153,7 +153,7 @@ function mergeHits(paths: RawHit[][], limit: number): RawHit[] {
 function hydrate(hits: RawHit[], type?: 'all' | 'image' | 'file' | 'webpage'): SearchResult[] {
   if (hits.length === 0) return []
   const db = getDb()
-  const stmt = db.prepare(`SELECT id, type, title, content, source_path, url, ocr_text, created_at FROM contents WHERE id = ?`)
+  const stmt = db.prepare(`SELECT id, type, title, content, source_path, thumbnail_path, url, ocr_text, created_at FROM contents WHERE id = ?`)
   /* R20：feed: 前缀命中来自订阅条目 */
   const feedStmt = db.prepare(
     `SELECT f.id, f.title, f.summary AS content, f.url, s.title AS sub_title, f.published_at AS created_at
@@ -179,7 +179,7 @@ function hydrate(hits: RawHit[], type?: 'all' | 'image' | 'file' | 'webpage'): S
       continue
     }
     const row = stmt.get(h.id) as
-      | { id: string; type: string; title: string; content: string; source_path: string | null; url: string | null; ocr_text: string; created_at: number }
+      | { id: string; type: string; title: string; content: string; source_path: string | null; thumbnail_path: string | null; url: string | null; ocr_text: string; created_at: number }
       | undefined
     if (!row) continue
     if (type && type !== 'all' && row.type !== type) continue
@@ -189,6 +189,7 @@ function hydrate(hits: RawHit[], type?: 'all' | 'image' | 'file' | 'webpage'): S
       snippet: makeSnippet(row.content || row.ocr_text),
       type: row.type as SearchResult['type'],
       sourcePath: row.source_path ?? undefined,
+      thumbnailPath: row.thumbnail_path ?? undefined,
       url: row.url ?? undefined,
       score: Number(h.score.toFixed(4)),
       createdAt: row.created_at
