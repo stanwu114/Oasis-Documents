@@ -350,39 +350,43 @@ function registerFilesIpc(): void {
     const limit = Math.min(Math.max(opts?.limit ?? 500, 1), 2000)
 
     /* R22：目录/分类在 SQL 里先过滤再分页——前端过滤分页数据会产生假空列表 */
-    const where: string[] = [`source_path IS NOT NULL`]
-    const params: unknown[] = []
+    /* 两套过滤范围：
+       scopeWhere —— 目录范围（total 与各分类计数永远按此统计，
+                     切换分类 tab 不改变「全部」与各分类的数字）；
+       rowWhere   —— 列表行过滤（目录 + 当前分类），只影响返回的行 */
+    const scope: string[] = [`source_path IS NOT NULL`]
+    const scopeParams: unknown[] = []
     if (opts?.dir) {
-      where.push(`(source_path = ? OR source_path LIKE ? ESCAPE '\\')`)
+      scope.push(`(source_path = ? OR source_path LIKE ? ESCAPE '\\')`)
       const esc = opts.dir.replace(/([%_\\])/g, '\\$1')
-      params.push(opts.dir, `${esc}/%`)
+      scopeParams.push(opts.dir, `${esc}/%`)
     }
-    if (opts?.category) {
-      where.push(`type = ?`)
-      params.push(opts.category)
-    }
-    const whereSql = `WHERE ${where.join(' AND ')}`
+    const scopeSql = `WHERE ${scope.join(' AND ')}`
 
-    const total = (db.prepare(`SELECT COUNT(*) as n FROM contents ${whereSql}`).get(...(params as never[])) as { n: number }).n
-    /* 分类计数：数组转 Record（前端按 counts[type] 取值；此前返回数组导致
-       前端取键恒为 undefined，"全部"外的 tab 计数全部显示 0） */
+    const row: string[] = [...scope]
+    const rowParams: unknown[] = [...scopeParams]
+    if (opts?.category) {
+      row.push(`type = ?`)
+      rowParams.push(opts.category)
+    }
+    const rowSql = `WHERE ${row.join(' AND ')}`
+
+    /* 「全部」= 目录范围内全部文件（与当前分类 tab 无关） */
+    const total = (db.prepare(`SELECT COUNT(*) as n FROM contents ${scopeSql}`).get(...(scopeParams as never[])) as { n: number }).n
+    /* 各分类计数：同样只按目录范围；数组转 Record（前端按 counts[type] 取值） */
     const countRows = (
-      opts?.dir
-        ? (db
-            .prepare(`SELECT type, COUNT(*) as n FROM contents ${whereSql} GROUP BY type`)
-            .all(...(params as never[])) as { type: string; n: number }[])
-        : (db
-            .prepare(`SELECT type, COUNT(*) as n FROM contents WHERE source_path IS NOT NULL GROUP BY type`)
-            .all() as { type: string; n: number }[])
+      db
+        .prepare(`SELECT type, COUNT(*) as n FROM contents ${scopeSql} GROUP BY type`)
+        .all(...(scopeParams as never[])) as { type: string; n: number }[]
     ).filter((r) => r.type !== 'webpage' && r.type !== 'note')
     const counts: Record<string, number> = Object.fromEntries(countRows.map((r) => [r.type, r.n]))
     const rows = db
       .prepare(
         `SELECT id, type, title, source_path, thumbnail_path, url, mime_type, file_size, created_at
-         FROM contents ${whereSql}
+         FROM contents ${rowSql}
          ORDER BY created_at DESC LIMIT ? OFFSET ?`
       )
-      .all(...([...params, limit, offset] as never[])) as {
+      .all(...([...rowParams, limit, offset] as never[])) as {
       id: string
       type: string
       title: string
