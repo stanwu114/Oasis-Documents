@@ -72,18 +72,32 @@ export function Sidebar(): React.ReactNode {
         {/* 我的文件（带二级目录树） */}
         <button type="button" className={btn(view === 'files' && !currentDir)} onClick={() => useUiStore.getState().openDir(null)}>
           <Icon name="files" size={15} /> 我的文件
-          <span
-            role="button"
-            tabIndex={-1}
-            className={`chevron${expanded ? ' open' : ''}`}
-            style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--fg-faint)', padding: '0 4px' }}
-            onClick={(e) => {
-              e.stopPropagation()
-              setExpanded(!expanded)
-            }}
-          >
-            {expanded ? '▾' : '▸'}
-          </span>
+        {/* 展开/收起指示：双箭头符号（› ‹ 造型清晰），点击整个区域可切换 */}
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={expanded ? '收起文件夹列表' : '展开文件夹列表'}
+          className={`chevron${expanded ? ' open' : ''}`}
+          style={{
+            marginLeft: 'auto',
+            fontSize: 16,
+            lineHeight: 1,
+            color: expanded ? 'var(--accent)' : 'var(--fg-muted)',
+            padding: '2px 4px',
+            marginRight: -4,
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.18s ease, color 0.12s',
+            display: 'inline-flex',
+            alignItems: 'center',
+            cursor: 'pointer'
+          }}
+          onClick={(e) => {
+            e.stopPropagation()
+            setExpanded(!expanded)
+          }}
+        >
+          ›
+        </span>
         </button>
 
         {expanded ? (
