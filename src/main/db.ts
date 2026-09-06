@@ -45,7 +45,8 @@ function migrate(): void {
       created_at    INTEGER NOT NULL,
       updated_at    INTEGER NOT NULL,
       indexed_at    INTEGER,
-      needs_reindex INTEGER NOT NULL DEFAULT 0
+      needs_reindex INTEGER NOT NULL DEFAULT 0,
+      file_mtime   INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_contents_type ON contents(type);
     CREATE INDEX IF NOT EXISTS idx_contents_hash ON contents(hash);
@@ -131,6 +132,13 @@ function migrate(): void {
       created_at  INTEGER NOT NULL
     );
   `)
+
+  /* N02：存量库补 file_mtime 列（幂等迁移） */
+  try {
+    d.exec(`ALTER TABLE contents ADD COLUMN file_mtime INTEGER`)
+  } catch {
+    /* 列已存在 */
+  }
 
   /* ---- 全文检索（阶段 D）：FTS5 + 中文 bigram 预分词 ---- */
   const ftsOk = (() => {

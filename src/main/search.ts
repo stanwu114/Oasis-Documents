@@ -1,6 +1,6 @@
 import { getDb } from './db'
 import { ftsSearch } from './fts'
-import { getEmbedders, embedTextsSafe, embedImages, embedTextToImageSpace } from './embedder'
+import { getEmbedders, embedderReadiness, embedTextsSafe, embedImages, embedTextToImageSpace } from './embedder'
 import type { SearchResult } from '../shared/ipc'
 
 /* ================================================================
@@ -202,12 +202,13 @@ function makeSnippet(text: string, len = 120): string {
   return clean.length > len ? clean.slice(0, len) + '…' : clean
 }
 
-/* 检查嵌入引擎就绪状态（设置页/搜索前提示用） */
+/* 检查嵌入引擎就绪状态（N12：真实状态而非硬编码） */
 export function embedderStatus(): { textReady: boolean; imageReady: boolean; provider: string } {
   const { text } = getEmbedders()
+  const ready = embedderReadiness()
   return {
-    textReady: true,
-    imageReady: true,
+    textReady: ready.textReady,
+    imageReady: ready.imageReady,
     provider: text.info.name
   }
 }

@@ -95,7 +95,7 @@ async function flushTable(table: VectorTable): Promise<void> {
   }
 }
 
-async function flushAll(): Promise<void> {
+export async function flushAll(): Promise<void> {
   for (const t of [...buffers.keys()]) await flushTable(t)
 }
 
@@ -133,7 +133,7 @@ export function enqueueEmbedding(
 }
 
 /** 补扫：模型下载后，把历史上跳过的 needs_reindex 内容收编进队列（带进度会话）。
- *  R15：持续翻页直至取完——不再固定前 500 条留下剩余任务 */
+ *  R15：持续翻页直至取完；N14：模型不就绪的行 10 分钟内不再反复取出 */
 export function reindexPending(pageSize = 500): number {
   const db = getDb()
   const ready = embedderReadiness()
@@ -142,8 +142,23 @@ export function reindexPending(pageSize = 500): number {
   let queued = 0
   for (;;) {
     const rows = db
-      .prepare(`SELECT id, type, source_path, content FROM contents WHERE needs_reindex = 1 LIMIT ?`)
-      .all(pageSize) as { id: string; type: string; source_path: string | null; content: string }[]
+      .prepare(
+        `SELECT id, type, source_path, content FROM contents
+         WHERE needs_reindex = 1
+           AND (
+             json_extract(COALESCE(meta,'{}'), '$.last_attempt') IS NULL
+             OR CAST(json_extract(COALESCE(meta,'{}'), '$.last_attempt') AS INTEGER) < ?
+           )
+         LIMIT ?`
+      )
+      .all(Date.now() - 10 * 60_000, pageSize) as { id: string; type: string; source_path: string | null; content: string }[]
+    /* N14：翻页前标记本批 last_attempt，防同一批无限循环 */
+    if (rows.length > 0) {
+      const mark = db.prepare(
+        `UPDATE contents SET meta = json_set(COALESCE(meta,'{}'), '$.last_attempt', ?) WHERE id = ?`
+      )
+      for (const r of rows) mark.run(Date.now(), r.id)
+    }
     if (rows.length === 0) break
 
     let pageQueued = 0
@@ -153,17 +168,15 @@ export function reindexPending(pageSize = 500): number {
           waiting.push({ contentId: r.id, kind: 'image', payload: r.source_path })
           queued++
           pageQueued++
-        } else {
-          /* 图片模型不可用：直接跳过该行，翻页继续（避免阻塞后续文本任务） */
-          db.prepare(`UPDATE contents SET needs_reindex = 1, indexed_at = indexed_at WHERE id = ?`).run(r.id)
         }
+        /* N14：图片模型不可用 → 跳过（不改状态；SQL 侧已用 meta.last_attempt 节流见下） */
       } else if (r.content?.trim() && ready.textReady) {
         waiting.push({ contentId: r.id, kind: 'text', payload: r.content, meta: { contentType: 'document' } })
         queued++
         pageQueued++
       }
-      /* 不可执行的行保持 needs_reindex=1，但不计入本批——翻页继续 */
     }
+
     if (pageQueued === 0 && rows.length < pageSize) break
     if (pageQueued === 0) {
       /* 整页都不可执行：退出避免死循环（全部为不可处理类型） */
@@ -257,8 +270,11 @@ async function runJob(job: Job): Promise<void> {
             const { ftsUpsert } = await import('../fts')
             const title = (db2.prepare(`SELECT title FROM contents WHERE id = ?`).get(job.contentId) as { title: string } | undefined)?.title ?? ''
             ftsUpsert(job.contentId, title, text)
-            /* OCR 文本同时进语义索引（text 空间） */
-            enqueueTextEmbed(job.contentId, text)
+            /* OCR 文本同时进语义索引（text 空间）；
+               N17：级联任务同步追加 embedTotal，完成报告计数不失真 */
+            if (enqueueTextEmbed(job.contentId, text)) {
+              void import('../import-progress').then((m) => m.addEmbedTotal(1))
+            }
           }
         }
       } catch {
@@ -343,8 +359,8 @@ export function chunkText(text: string, maxLen = 400, overlap = 40): { index: nu
       chunks.push(rest.slice(0, maxLen))
       rest = rest.slice(maxLen - overlap)
     }
-    if ((buf + '\n' + rest).length > maxLen) {
-      chunks.push(buf)
+    if ((buf ? buf.length + 1 : 0) + rest.length > maxLen) {
+      if (buf) chunks.push(buf) /* N13：空 buf 不产生空片 */
       buf = rest
     } else {
       buf = buf ? `${buf}\n${rest}` : rest

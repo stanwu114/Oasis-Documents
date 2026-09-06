@@ -216,6 +216,13 @@ export function endIndexSession(enqueued: number): void {
   broadcast(true)
 }
 
+/** N17：级联任务（OCR 追加嵌入等）动态扩大分母，计数不失真 */
+export function addEmbedTotal(n: number): void {
+  state.embedTotal += n
+  touch()
+  broadcast()
+}
+
 /** 单个嵌入任务完成（成功或失败都计数） */
 export function tickEmbedSession(): void {
   state.embedDone++

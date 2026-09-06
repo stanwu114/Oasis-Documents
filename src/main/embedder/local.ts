@@ -212,20 +212,50 @@ export class LocalTextEmbedder implements TextEmbedder {
 
   async embedTexts(texts: string[]): Promise<number[][]> {
     await this.ensureSession()
+    /* N03：批推理——同批 padding 到最长序列，一次 run [B, L]；
+         吞吐量为逐条的数倍（外层调用一次只传 1 条时自动退化为 batch=1） */
     const out: number[][] = []
-    for (const text of texts) {
-      const tok = this.tokenizer!.encode(text)
-      const feeds: Record<string, ort.Tensor> = {
-        input_ids: new ort.Tensor('int64', tok.inputIds, [1, tok.inputIds.length]),
-        attention_mask: new ort.Tensor('int64', tok.attentionMask, [1, tok.attentionMask.length]),
-        token_type_ids: new ort.Tensor('int64', tok.tokenTypeIds, [1, tok.tokenTypeIds.length])
+    const BATCH = 16
+    for (let b = 0; b < texts.length; b += BATCH) {
+      const batchTexts = texts.slice(b, b + BATCH)
+      const toks = batchTexts.map((t) => this.tokenizer!.encode(t))
+      const L = Math.max(...toks.map((t) => t.inputIds.length))
+      const B = toks.length
+      const ids = new BigInt64Array(B * L)
+      const mask = new BigInt64Array(B * L)
+      const typeIds = new BigInt64Array(B * L)
+      for (let i = 0; i < B; i++) {
+        for (let j = 0; j < toks[i].inputIds.length; j++) {
+          ids[i * L + j] = toks[i].inputIds[j]
+          mask[i * L + j] = toks[i].attentionMask[j]
+          typeIds[i * L + j] = toks[i].tokenTypeIds[j]
+        }
       }
       const tensor = await this.mutex.run(async () => {
-        const res = await this.session!.run(feeds)
-        /* 按名称选择输出，不依赖 Object.values 顺序（R13） */
+        const res = await this.session!.run({
+          input_ids: new ort.Tensor('int64', ids, [B, L]),
+          attention_mask: new ort.Tensor('int64', mask, [B, L]),
+          token_type_ids: new ort.Tensor('int64', typeIds, [B, L])
+        })
         return res.logits ?? res.last_hidden_state ?? Object.values(res)[0]
       })
-      out.push(poolToVector(tensor, 'cls'))
+      /* [B, L, dim] → 逐条取 CLS（首个有效 token，padding 已由 mask 界定） */
+      const dims = tensor.dims
+      if (dims.length === 3 && dims[0] === B) {
+        const data = tensor.data as Float32Array
+        const dim = dims[2]
+        for (let i = 0; i < B; i++) {
+          out.push(poolToVector({ data: data.subarray(i * L * dim, (i + 1) * L * dim), dims: [1, L, dim], type: tensor.type } as unknown as ort.Tensor, 'cls'))
+        }
+      } else if (dims.length === 2 && dims[0] === B) {
+        const data = tensor.data as Float32Array
+        const dim = dims[1]
+        for (let i = 0; i < B; i++) {
+          out.push(poolToVector({ data: data.subarray(i * dim, (i + 1) * dim), dims: [1, dim], type: tensor.type } as unknown as ort.Tensor, 'cls'))
+        }
+      } else {
+        throw new Error(`BGE 批输出形状异常: [${dims.join(',')}]`)
+      }
     }
     return out
   }
@@ -302,16 +332,31 @@ export class LocalImageEmbedder implements ImageEmbedder {
 
   async embedImages(imagePaths: string[]): Promise<number[][]> {
     await this.ensureSessions()
+    /* N03：图片批推理——预处理（sharp 解码）与推理重叠，≤8 张一批 */
     const out: number[][] = []
-    for (const p of imagePaths) {
-      const pixel = await this.preprocess(p)
+    const BATCH = 8
+    for (let b = 0; b < imagePaths.length; b += BATCH) {
+      const batch = imagePaths.slice(b, b + BATCH)
+      const pixels = await Promise.all(batch.map((p) => this.preprocess(p)))
+      const B = pixels.length
+      const merged = new Float32Array(B * 3 * 224 * 224)
+      pixels.forEach((px, i) => merged.set(px, i * px.length))
       const tensor = await this.imgMutex.run(async () => {
         const res = await this.imgSession!.run({
-          pixel_values: new ort.Tensor('float32', pixel, [1, 3, 224, 224])
+          pixel_values: new ort.Tensor('float32', merged, [B, 3, 224, 224])
         })
         return Object.values(res)[0]
       })
-      out.push(poolToVector(tensor))
+      const dims = tensor.dims
+      const data = tensor.data as Float32Array
+      if (dims.length === 2 && dims[0] === B) {
+        const dim = dims[1]
+        for (let i = 0; i < B; i++) {
+          out.push(poolToVector({ data: data.subarray(i * dim, (i + 1) * dim), dims: [1, dim], type: tensor.type } as unknown as ort.Tensor, 'mean'))
+        }
+      } else {
+        throw new Error(`CLIP 批输出形状异常: [${dims.join(',')}]`)
+      }
     }
     return out
   }

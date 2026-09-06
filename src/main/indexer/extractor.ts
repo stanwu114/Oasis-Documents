@@ -31,16 +31,16 @@ const TEXT_SAFE_EXTS = new Set([
   '.c', '.h', '.cpp', '.hpp', '.swift', '.sh', '.sql', '.css', '.scss', '.vue', '.php'
 ])
 
-export async function extractContent(path: string, thumbnailsDir: string): Promise<ExtractResult> {
+export async function extractContent(path: string, thumbnailsDir: string, prehashed?: string): Promise<ExtractResult> {
   const ext = extname(path).toLowerCase()
   const s = await stat(path)
   const mimeType = lookup(path) || 'application/octet-stream'
   const category = classifyExt(ext)
 
   if (category === 'image')
-    return { ...(await extractImage(path, ext, s.size, mimeType, thumbnailsDir)), category }
+    return { ...(await extractImage(path, ext, s.size, mimeType, thumbnailsDir, prehashed)), category }
   if (category === 'video')
-    return { ...(await extractVideo(path, s.size, mimeType, thumbnailsDir)), category }
+    return { ...(await extractVideo(path, s.size, mimeType, thumbnailsDir, prehashed)), category }
   if (ext === '.pdf') return withCat(extractPdf(path, s.size), 'document')
   if (ext === '.docx') return withCat(extractDocx(path, s.size), 'document')
   if (TEXT_SAFE_EXTS.has(ext)) return withCat(extractText(path, s.size, mimeType), 'document')
@@ -69,7 +69,8 @@ async function extractImage(
   ext: string,
   size: number,
   mimeType: string,
-  thumbnailsDir: string
+  thumbnailsDir: string,
+  prehashed?: string
 ): Promise<Omit<ExtractResult, 'category'>> {
   const result: Omit<ExtractResult, 'category'> = { mimeType, fileSize: size, text: '', meta: {}, thumbnailPath: null }
 
@@ -80,8 +81,8 @@ async function extractImage(
     result.width = meta.width
     result.height = meta.height
 
-    /* 缩略图：统一 480px 宽 JPEG（GIF 取首帧） */
-    const hash = await sha256File(path)
+    /* 缩略图：统一 480px 宽 JPEG（GIF 取首帧）；N01 哈希由调用方传入复用 */
+    const hash = prehashed ?? (await sha256File(path))
     const thumbPath = `${thumbnailsDir}/${hash.slice(0, 16)}.jpg`
     try {
       await sharp(decodable, { failOn: 'none' })
@@ -114,11 +115,12 @@ async function extractVideo(
   path: string,
   size: number,
   mimeType: string,
-  thumbnailsDir: string
+  thumbnailsDir: string,
+  prehashed?: string
 ): Promise<Omit<ExtractResult, 'category'>> {
   const result: Omit<ExtractResult, 'category'> = { mimeType, fileSize: size, text: '', meta: {}, thumbnailPath: null }
   try {
-    const hash = await sha256File(path)
+    const hash = prehashed ?? (await sha256File(path))
     const thumbPath = `${thumbnailsDir}/${hash.slice(0, 16)}.jpg`
     const ffmpeg = (await import('ffmpeg-static')).default as string
     const { execFile } = await import('node:child_process')

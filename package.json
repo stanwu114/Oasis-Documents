@@ -30,7 +30,6 @@
     "mammoth": "^1.9.0",
     "mime-types": "^2.1.35",
     "onnxruntime-node": "^1.20.1",
-    "p-queue": "^8.1.0",
     "pdf-parse": "^1.1.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

@@ -43,14 +43,32 @@ export async function executeSuggestions(suggestionIds: number[]): Promise<Execu
     try {
       if (item.action === 'move' && item.target_path) {
         await safeMove(item.file_path, item.target_path)
+        /* N06：同步 contents/file_hashes 路径——资产 ID、标签、笔记、向量全部保留；
+           watcher 的 add 事件命中"同路径+同哈希→跳过"，unlink 旧路径成为 no-op */
+        db.prepare(
+          `UPDATE contents SET source_path = ?, updated_at = ? WHERE source_path = ?`
+        ).run(item.target_path, Date.now(), item.file_path)
+        db.prepare(`UPDATE file_hashes SET path = ? WHERE path = ?`).run(item.target_path, item.file_path)
         insertLog.run(batchId, 'move', item.file_path, item.target_path, 'done', null, Date.now())
       } else if (item.action === 'trash') {
         await moveToTrash(item.file_path)
         insertLog.run(batchId, 'trash', item.file_path, null, 'done', null, Date.now())
       } else if (item.action === 'tag') {
-        // tag 动作只更新 contents.tags，不动文件系统
+        /* N10：合并已有标签而非覆盖 */
+        const row = db.prepare(`SELECT tags FROM contents WHERE source_path = ?`).get(item.file_path) as
+          | { tags: string }
+          | undefined
+        const existing: string[] = (() => {
+          try {
+            const v = JSON.parse(row?.tags ?? '[]')
+            return Array.isArray(v) ? v.map(String) : []
+          } catch {
+            return []
+          }
+        })()
+        const merged = [...new Set([...existing, item.target_path ?? ''].filter(Boolean))]
         db.prepare(`UPDATE contents SET tags = ?, updated_at = ? WHERE source_path = ?`)
-          .run(item.target_path ?? '', Date.now(), item.file_path)
+          .run(JSON.stringify(merged), Date.now(), item.file_path)
         insertLog.run(batchId, 'tag', item.file_path, null, 'done', null, Date.now())
       }
       markDone.run(item.id)
@@ -133,14 +151,17 @@ export async function trashFiles(paths: string[]): Promise<ExecuteResult> {
     INSERT INTO organize_logs (batch_id, action, from_path, to_path, status, error, created_at)
     VALUES (?, 'trash', ?, NULL, ?, ?, ?)
   `)
-  const removeContent = db.prepare(`DELETE FROM contents WHERE source_path = ?`)
+  const ids = db.prepare(`SELECT id FROM contents WHERE source_path = ?`)
 
   const result: ExecuteResult = { batchId, done: 0, failed: [] }
   for (const path of paths) {
     try {
       await moveToTrash(path)
       insertLog.run(batchId, path, 'done', null, Date.now())
-      removeContent.run(path)
+      /* N05：级联清理（FTS/向量/笔记），与 watcher unlink 同一语义 */
+      const rows = ids.all(path) as { id: string }[]
+      const { deleteContentCascade } = await import('../indexer/pipeline')
+      for (const r of rows) deleteContentCascade(r.id)
       result.done++
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

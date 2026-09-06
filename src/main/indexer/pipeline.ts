@@ -5,6 +5,7 @@ import { deleteVectors } from '../lancedb'
 import { ftsUpsert, ftsDelete } from '../fts'
 import { extractContent, titleFromPath } from './extractor'
 import { sha256File } from '../organizer/hasher'
+import { statFile, fingerprintHit } from '../fingerprint'
 import { enqueueEmbedding } from './embedding-pipeline'
 
 /* ================================================================
@@ -51,8 +52,8 @@ export async function indexFiles(
   const insert = db.prepare(`
     INSERT INTO contents
       (id, type, title, content, source_path, mime_type, file_size, hash,
-       thumbnail_path, tags, meta, created_at, updated_at, indexed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)
+       thumbnail_path, tags, meta, created_at, updated_at, indexed_at, needs_reindex, file_mtime)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `)
   /* R04：按路径判重（同哈希的不同物理文件都要入库），同路径+同哈希跳过 */
@@ -84,22 +85,37 @@ export async function indexFiles(
       if (i >= total) return
       const path = paths[i]
       try {
+        /* N02：stat 预检——(path, size, mtime) 与库内一致 → 文件未变，
+           直接跳过（不读文件内容、不算哈希），消灭启动全量重读盘 */
+        const st = await statFile(path)
+        if (!st) throw new Error('文件不可访问')
+        if (fingerprintHit(path, st)) {
+          skipped++
+          if (sessionStarted) reportIndexResult('skip')
+          done++
+          if (sessionStarted) tickIndexSession()
+          continue
+        }
+
+        /* N01：哈希只算一次，作为参数传给提取器（缩略图命名复用） */
         const hash = await sha256File(path)
         const existing = pathRow.get(path) as { id: string; hash: string | null } | undefined
         if (existing && existing.hash === hash) {
           skipped++
           if (sessionStarted) reportIndexResult('skip')
+          /* 回写 mtime，下次启动走预检快速路径 */
+          db.prepare(`UPDATE contents SET file_mtime = ?, file_size = ? WHERE id = ?`).run(st.mtimeMs, st.size, existing.id)
         } else if (existing) {
           /* R05：同路径内容变化 → 保留资产 ID 与用户标签，仅更新派生字段 */
           ensureSession()
-          const ex = await extractContent(path, thumbs)
-          updateRevision(existing.id, ex, path, hash)
+          const ex = await extractContent(path, thumbs, hash)
+          updateRevision(existing.id, ex, path, hash, st)
           ftsUpsert(existing.id, titleFromPath(path), ex.text)
           reportIndexResult('ok')
           if (enqueueEmbedding(existing.id, ex.category, ex, path)) enqueued++
         } else {
           ensureSession()
-          const ex = await extractContent(path, thumbs)
+          const ex = await extractContent(path, thumbs, hash)
           const now = Date.now()
           const contentId = randomUUID()
           insert.run(
@@ -115,7 +131,11 @@ export async function indexFiles(
             JSON.stringify(ex.meta),
             now,
             now,
-            now
+            now,
+            /* N04：新内容先置 needs_reindex=1——向量持久化成功（flushTable markDone）
+               才清零；中途退出由下次启动补扫自愈，永不静默丢向量 */
+            1,
+            st.mtimeMs
           )
           ftsUpsert(contentId, titleFromPath(path), ex.text)
           reportIndexResult('ok')
@@ -147,17 +167,26 @@ export async function indexFiles(
   return { indexed: done - skipped - failed, skipped, failed }
 }
 
-/** 删除内容（文件被移除时）：SQLite 记录 + 全文索引 + LanceDB 向量 */
+/**
+ * N05：内容的唯一级联删除——SQLite 行 + FTS 全文 + 两张向量表 + 笔记。
+ * 所有删除入口（watcher unlink / 移除监控目录 / 整理清理）统一走这里，
+ * 杜绝派生数据残留（孤儿向量占检索名额、FTS 对账失配全量重建）。
+ */
+export function deleteContentCascade(contentId: string): void {
+  const db = getDb()
+  db.prepare(`DELETE FROM contents WHERE id = ?`).run(contentId)
+  db.prepare(`DELETE FROM notes WHERE content_id = ?`).run(contentId)
+  ftsDelete(contentId)
+  void deleteVectors('image_vectors', contentId).catch(() => {})
+  void deleteVectors('content_vectors', contentId).catch(() => {})
+}
+
+/** 按路径删除（watcher unlink 等） */
 export function removeByPath(path: string): number {
   const db = getDb()
   const rows = db.prepare(`SELECT id FROM contents WHERE source_path = ?`).all(path) as { id: string }[]
-  const info = db.prepare(`DELETE FROM contents WHERE source_path = ?`).run(path)
-  for (const r of rows) {
-    ftsDelete(r.id)
-    void deleteVectors('image_vectors', r.id).catch(() => {})
-    void deleteVectors('content_vectors', r.id).catch(() => {})
-  }
-  return info.changes
+  for (const r of rows) deleteContentCascade(r.id)
+  return rows.length
 }
 
 /** R05：同路径内容新版本——保留资产 ID 与用户标签，更新派生字段 */
@@ -165,12 +194,15 @@ function updateRevision(
   contentId: string,
   ex: Awaited<ReturnType<typeof extractContent>>,
   path: string,
-  hash: string
+  hash: string,
+  st?: { mtimeMs: number; size: number }
 ): void {
   const db = getDb()
   db.prepare(
     `UPDATE contents SET type = ?, title = ?, content = ?, mime_type = ?, file_size = ?,
-       hash = ?, thumbnail_path = ?, meta = ?, updated_at = ?, indexed_at = ?, needs_reindex = 0
+       hash = ?, thumbnail_path = ?, meta = ?, updated_at = ?, indexed_at = ?,
+       needs_reindex = CASE WHEN ? = 'image' OR COALESCE(?, '') != '' THEN 1 ELSE 0 END,
+       file_mtime = ?
      WHERE id = ?`
   ).run(
     ex.category,
@@ -183,6 +215,9 @@ function updateRevision(
     JSON.stringify(ex.meta),
     Date.now(),
     Date.now(),
+    ex.category,
+    ex.text,
+    st?.mtimeMs ?? null,
     contentId
   )
   /* 旧版本向量异步清理（重嵌前 embedding-pipeline 也会清） */

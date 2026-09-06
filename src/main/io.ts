@@ -127,6 +127,9 @@ export async function importJson(json: string): Promise<{ contents: number; subs
       `INSERT INTO contents (id, type, title, content, url, platform, tags, created_at, updated_at, indexed_at)
        VALUES (?, 'webpage', ?, '', ?, ?, ?, ?, ?, ?)`
     ).run(id, c.title ?? '', c.url, c.platform ?? null, JSON.stringify(c.tags ?? []), c.createdAt ?? now, now, now)
+    /* N11：导入即进 FTS（不等启动对账）与语义嵌入 */
+    const { ftsUpsert } = await import('./fts')
+    ftsUpsert(id, c.title ?? '', '')
     contents++
   }
 

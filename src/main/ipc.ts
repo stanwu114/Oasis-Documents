@@ -188,7 +188,7 @@ function registerFilesIpc(): void {
       totalFiles: row.total,
       indexedFiles: indexed.n,
       pendingFiles: pending.n,
-      isScanning: false,
+      isScanning: getImportProgress().phase === 'indexing',
       lastScanAt: null
     }
   })
@@ -274,8 +274,9 @@ function registerFilesIpc(): void {
     ).filter((r) => underRoot(r.source_path))
     const thumbs = localRows.map((r) => r.thumbnail_path).filter((t): t is string => Boolean(t))
 
-    const delContents = db.prepare(`DELETE FROM contents WHERE id = ?`)
-    for (const r of localRows) delContents.run(r.id)
+    /* N05：统一级联删除（FTS + 向量 + 笔记），不再裸 DELETE */
+    const { deleteContentCascade } = await import('./indexer/pipeline')
+    for (const r of localRows) deleteContentCascade(r.id)
 
     /* R07：哈希缓存与重复组同步清理（同一边界规则） */
     const hashRows = db.prepare(`SELECT path FROM file_hashes`).all() as { path: string }[]
@@ -635,29 +636,32 @@ function registerIoIpc(): void {
     const m = await import('./io')
     return m.exportJson()
   })
+  /* N09：文件读写只允许会话内经对话框选择的路径（纵深防御） */
+  const sessionPaths = new Set<string>()
   ipcMain.handle('io:pickOpenFile', async (_e, extensions: string[]): Promise<string | null> => {
     const focused = win()
-    const opts: Electron.OpenDialogOptions = {
-      properties: ['openFile'],
-      filters: [{ name: '导入文件', extensions }]
-    }
+    const opts: Electron.OpenDialogOptions = { properties: ['openFile'], filters: [{ name: '导入文件', extensions }] }
     const res = focused ? await dialog.showOpenDialog(focused, opts) : await dialog.showOpenDialog(opts)
-    return res.canceled ? null : (res.filePaths[0] ?? null)
+    const p = res.canceled ? null : (res.filePaths[0] ?? null)
+    if (p) sessionPaths.add(p)
+    return p
   })
   ipcMain.handle('io:pickSaveFile', async (_e, defaultName: string): Promise<string | null> => {
     const focused = win()
     const res = focused
       ? await dialog.showSaveDialog(focused, { defaultPath: defaultName })
       : await dialog.showSaveDialog({ defaultPath: defaultName })
-    return res.canceled ? null : (res.filePath ?? null)
+    const p = res.canceled ? null : (res.filePath ?? null)
+    if (p) sessionPaths.add(p)
+    return p
   })
   ipcMain.handle('io:readFile', (_e, path: string) => {
-    const m = ioModule
-    return m.readTextFile(path)
+    if (!sessionPaths.has(path)) throw new Error('路径未经用户选择，拒绝读取')
+    return ioModule.readTextFile(path)
   })
   ipcMain.handle('io:writeFile', (_e, path: string, content: string) => {
-    const m = ioModule
-    return m.writeTextFile(path, content)
+    if (!sessionPaths.has(path)) throw new Error('路径未经用户选择，拒绝写入')
+    return ioModule.writeTextFile(path, content)
   })
 }
 
