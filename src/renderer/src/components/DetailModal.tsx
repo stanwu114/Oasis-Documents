@@ -19,18 +19,27 @@ export function DetailModal(): React.ReactNode {
   const [notes, setNotes] = useState<NoteRow[]>([])
   const [sel, setSel] = useState<string>('')
   const [rev, setRev] = useState(0)
+  const [loadError, setLoadError] = useState('')
+  const [mediaError, setMediaError] = useState('')
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     if (!detailId) return
+    let active = true
+    setLoadError('')
+    setMediaError('')
     setData(null)
     setNotes([])
     void (async () => {
       const d =
         (await window.oasis.files.getReading(detailId)) ?? (await window.oasis.files.getDetail(detailId))
+      if (!active) return
+      if (!d) { setLoadError('收藏不存在或已删除'); return }
       setData(d as unknown as ContentDetail)
-      if (d) setNotes(await window.oasis.notes.list(d.id))
-    })()
+      const loadedNotes = await window.oasis.notes.list(d.id)
+      if (active) setNotes(loadedNotes)
+    })().catch((error) => { if (active) setLoadError(`加载失败：${String(error)}`) })
+    return () => { active = false }
   }, [detailId, rev])
 
   if (!detailId) return null
@@ -48,7 +57,8 @@ export function DetailModal(): React.ReactNode {
     setRefreshing(true)
     try {
       const r = await window.oasis.platform.refresh(data.id)
-      useUiStore.getState().showToast(`已重新抓取:${r.images} 张图${r.video ? ' · 含视频' : ''}`)
+      useUiStore.getState().showToast(r.warnings.length ? `部分下载失败：${r.warnings[0]}` : `已重新抓取:${r.images} 张图${r.video ? ' · 含视频' : ''}`, r.warnings.length ? 'error' : undefined)
+      useUiStore.getState().bumpContents()
       setRev((x) => x + 1)
     } catch (e) {
       useUiStore.getState().showToast(`重新抓取失败:${e instanceof Error ? e.message : e}`, 'error')
@@ -72,7 +82,7 @@ export function DetailModal(): React.ReactNode {
         </button>
 
         {!data ? (
-          <div className="detail-loading">载入中…</div>
+          <div className="detail-loading">{loadError || '载入中…'}</div>
         ) : (
           <>
             <div className="detail-title">{data.title || '未命名'}</div>
@@ -125,9 +135,11 @@ export function DetailModal(): React.ReactNode {
             ) : (
               <div className="detail-body">
                 {/* 收藏图集:图在上,文在下;视频笔记内嵌播放 */}
+                {Array.isArray(meta.downloadWarnings) && meta.downloadWarnings.length > 0 ? <p role="alert">部分媒体未能下载到本地，可点击「重新抓取图文」重试。</p> : null}
                 {videoPath ? (
                   <div className="reading-gallery">
-                    <video controls preload="metadata" src={toMediaUrl(videoPath) ?? undefined} />
+                    <video controls preload="metadata" poster={toMediaUrl(data.thumbnail_path) ?? undefined} src={toMediaUrl(videoPath) ?? undefined} onError={() => setMediaError('本地视频无法播放，可重新抓取后重试。')} />
+                    {mediaError ? <p role="alert">{mediaError}</p> : null}
                   </div>
                 ) : null}
                 {gallery.length > 0 ? (
@@ -141,7 +153,7 @@ export function DetailModal(): React.ReactNode {
                       />
                     ))}
                   </div>
-                ) : isWebpage ? (
+                ) : isWebpage && !videoPath ? (
                   <div className="detail-hint" style={{ marginBottom: 8 }}>
                     这条收藏没有本地图片——点右上角「重新抓取图文」补齐图集
                   </div>

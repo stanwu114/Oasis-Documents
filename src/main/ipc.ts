@@ -19,8 +19,6 @@ import { autoTagSmart, mergeTags } from './autotag'
 import { classifyExt } from '../shared/classify'
 import { isUnderRoot } from './path-boundary'
 import { testProviderConnection } from './llm-providers'
-import { getMediaParserConf, saveMediaParserConf, testMediaParser } from './platforms/external'
-import { xhsSidecarStatus, enableBuiltinXhs, stopXhsSidecar, setBuiltinXhs } from './platforms/xhs-sidecar'
 import { buildSystemStatus } from './status'
 import { getImportProgress } from './import-progress'
 import { persistEmbeddingSettings, hydrateEmbeddingSettings } from './credentials'
@@ -497,7 +495,7 @@ function registerModelIpc(): void {
 
 /* ---- 平台收藏（L1 链接导入） ---- */
 function registerPlatformIpc(): void {
-  ipcMain.handle('platform:importLink', async (_e, url: string) => importLink(url))
+  ipcMain.handle('platform:importLink', async (e, url: string) => importLink(url, { signal: AbortSignal.timeout(180_000), onProgress: (progress) => { if (!e.sender.isDestroyed()) e.sender.send('platform:progress', progress) } }))
 
   ipcMain.handle('platform:listPlugins', () => listPlugins())
 
@@ -543,22 +541,10 @@ function registerPlatformIpc(): void {
     return { removed: true }
   })
 
-  /* 存量内容补打 AI 标签（在线文本模型优先，本地兜底） */
-  /* 外部解析服务(可选:XHS-Downloader / Douyin_TikTok_Download_API) */
-  ipcMain.handle('mediaParser:get', () => getMediaParserConf())
-  ipcMain.handle('mediaParser:set', (_e, conf: { xhs?: string; douyin?: string }) => saveMediaParserConf(conf))
-  ipcMain.handle('mediaParser:test', (_e, base: string) => testMediaParser(base))
-  ipcMain.handle('mediaParser:builtinStatus', () => xhsSidecarStatus())
-  ipcMain.handle('mediaParser:builtinEnable', async (_e) => enableBuiltinXhs())
-  ipcMain.handle('mediaParser:builtinDisable', () => {
-    stopXhsSidecar()
-    setBuiltinXhs(false)
-  })
-
   /* 重新抓取图文(存量收藏图片未落地/链接内容更新时) */
   ipcMain.handle('platform:refresh', async (_e, id: string) => {
     const { refreshPlatformContent } = await import('./platforms')
-    return refreshPlatformContent(id)
+    return refreshPlatformContent(id, { signal: AbortSignal.timeout(180_000) })
   })
 
   ipcMain.handle('platform:retag', async () => {

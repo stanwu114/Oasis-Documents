@@ -1,7 +1,8 @@
 /** 抖音分享页路由数据提取回归(明文 JSON/百分号/uri 兜底/图集回退) */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractRouterData } from '../src/main/platforms/douyin-data.ts'
+import { loadPlatform } from './load-platform.cjs'
+const { extractRouterData } = loadPlatform('douyin-data')
 
 function page(json: string): string {
   return `<html><body><script>window._ROUTER_DATA = ${json}</script></body></html>`
@@ -97,4 +98,29 @@ test('图集:url_list 空回退 download_url_list,取全部图', () => {
 
 test('无路由数据返回 null(RENDER_DATA 兜底路径)', () => {
   assert.equal(extractRouterData('<html>empty</html>'), null)
+})
+
+ test('URL 编码的 RENDER_DATA 和非首个 loader 节点也能解析', () => {
+  const payload = {loaderData: {layout: {user: {}}, detail: {aweme_detail: {desc: '100% 完整', images: [{url_list: ['https://example.com/a.jpg']}]}}}}
+  const html = `<script id="RENDER_DATA" type="application/json">${encodeURIComponent(JSON.stringify(payload))}</script>`
+  assert.deepEqual(extractRouterData(html)?.images, ['https://example.com/a.jpg'])
+  assert.equal(extractRouterData(html)?.desc, '100% 完整')
+})
+
+test('按作品编号选择目标，不能把推荐视频当成收藏', () => {
+  const payload = {recommend: {aweme_id: '1111111111111111111', desc: '推荐', video: {play_addr: {url_list: ['https://example.com/wrong.mp4']}}}, detail: {aweme_id: '7675581342318447907', desc: '目标', video: {play_addr: {url_list: ['https://example.com/right.mp4']}}}}
+  assert.equal(extractRouterData(page(JSON.stringify(payload)), '7675581342318447907')?.desc, '目标')
+  assert.equal(extractRouterData(page(JSON.stringify(payload)), '2222222222222222222'), null)
+})
+test('桌面 camelCase 视频数据、备用地址与空节点', () => {
+  const payload = {empty:{images:[]},detail:{awemeId:'7675581342318447907',desc:'DIY',authorInfo:{nickname:'作者'},video:{playAddr:{urlList:['https://example.com/a.mp4','https://example.com/b.mp4']},originCover:{urlList:['https://example.com/cover.jpg']}}}}
+  const result = extractRouterData(`<script id="RENDER_DATA">${encodeURIComponent(JSON.stringify(payload))}</script>`, '7675581342318447907')
+  assert.equal(result?.author,'作者')
+  assert.equal(result?.cover,'https://example.com/cover.jpg')
+  assert.deepEqual(result?.videoUrls,['https://example.com/a.mp4','https://example.com/b.mp4'])
+})
+test('图集不下载 video 字段里的背景音频', () => {
+  const result = extractRouterData(page(JSON.stringify({images:[{url_list:['https://example.com/a.jpg']}],video:{play_addr:{url_list:['https://example.com/music.mp4']}}})))
+  assert.deepEqual(result?.images,['https://example.com/a.jpg'])
+  assert.equal(result?.videoUrl,undefined)
 })

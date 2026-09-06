@@ -41,28 +41,6 @@ export function SettingsView(): React.ReactNode {
   const [saving, setSaving] = useState(false)
   const [models, setModels] = useState<ModelStatus[]>([])
 
-  /* 外部解析服务(可选) */
-  const [mpXhs, setMpXhs] = useState('')
-  const [mpDy, setMpDy] = useState('')
-  const [mpTesting, setMpTesting] = useState<'xhs' | 'douyin' | null>(null)
-  const [mpResult, setMpResult] = useState<Record<string, boolean | null>>({})
-  /* 内置小红书引擎(全部容错:通道缺失/服务失败绝不拖垮设置页) */
-  const [builtin, setBuiltin] = useState<{ installed: boolean; running: boolean; enabled: boolean } | null>(null)
-  const [builtinBusy, setBuiltinBusy] = useState(false)
-  const [builtinError, setBuiltinError] = useState<string | null>(null)
-
-  const refreshBuiltin = async (): Promise<void> => {
-    try {
-      setBuiltinError(null)
-      const st = await window.oasis.platform.mediaParser?.builtin?.status()
-      if (st) setBuiltin(st)
-      else setBuiltinError('通道不可用(需完全重启应用)')
-    } catch (e) {
-      setBuiltinError(e instanceof Error ? e.message : String(e))
-      setBuiltin(null)
-    }
-  }
-
   /* 在线接入表单(镜像 embedding.onlineProvider) */
   const [provider, setProvider] = useState<ProviderId>('bailian')
   const [apiKey, setApiKey] = useState('')
@@ -86,14 +64,6 @@ export function SettingsView(): React.ReactNode {
       })
       .catch((e: unknown) => useUiStore.getState().showToast(`配置读取失败：${e instanceof Error ? e.message : e}`, 'error'))
     void window.oasis.models.status().then(setModels).catch(() => undefined)
-    void Promise.resolve(window.oasis.platform.mediaParser?.get?.())
-      .then((c) => {
-        if (!c) return
-        setMpXhs(c.xhs ?? '')
-        setMpDy(c.douyin ?? '')
-      })
-      .catch(() => undefined)
-    void refreshBuiltin()
     const off = window.oasis.on.modelProgress((s) => {
       setModels((prev) => prev.map((m) => (m.name === s.name ? s : m)))
     })
@@ -185,43 +155,6 @@ export function SettingsView(): React.ReactNode {
       useUiStore.getState().showToast('设置已保存')
     } finally {
       setSaving(false)
-    }
-  }
-
-  const saveMediaParser = async (): Promise<void> => {
-    await window.oasis.platform.mediaParser.set({
-      xhs: mpXhs.trim() || undefined,
-      douyin: mpDy.trim() || undefined
-    })
-    useUiStore.getState().showToast('外部解析服务已保存')
-  }
-
-  const testMp = async (kind: 'xhs' | 'douyin'): Promise<void> => {
-    const base = kind === 'xhs' ? mpXhs.trim() : mpDy.trim()
-    if (!base) return
-    setMpTesting(kind)
-    try {
-      const ok = await window.oasis.platform.mediaParser.test(base)
-      setMpResult((r) => ({ ...r, [kind]: ok }))
-    } finally {
-      setMpTesting(null)
-    }
-  }
-
-  const toggleBuiltin = async (): Promise<void> => {
-    setBuiltinBusy(true)
-    try {
-      if (builtin?.enabled) {
-        await window.oasis.platform.mediaParser?.builtin?.disable()
-      } else {
-        const ok = await window.oasis.platform.mediaParser?.builtin?.enable()
-        useUiStore.getState().showToast(ok ? '内置小红书引擎已就绪' : '引擎已下载但启动失败,解析时将自动重试', ok ? 'info' : 'error')
-      }
-      await refreshBuiltin()
-    } catch (e) {
-      useUiStore.getState().showToast(`内置引擎操作失败：${e instanceof Error ? e.message : e}`, 'error')
-    } finally {
-      setBuiltinBusy(false)
     }
   }
 
@@ -364,61 +297,6 @@ export function SettingsView(): React.ReactNode {
           <button type="button" className="btn primary" onClick={() => void save()} disabled={saving}>
             {saving ? '保存中…' : '保存设置'}
           </button>
-        </div>
-      </section>
-
-      {/* 外部解析服务(可选) */}
-      <section className="settings-section">
-        <h3>外部解析服务（可选 · 推荐）</h3>
-        <p className="settings-value" style={{ lineHeight: 1.7, marginBottom: 12 }}>
-          小红书可一键启用内置引擎(应用自动下载 XHS-Downloader 并托管运行,导入与重抓自动走它);抖音自建服务后填地址。服务离线或解析失败自动回落内置解析。
-        </p>
-        <div className="settings-row">
-          <span>小红书 · 内置引擎（推荐）</span>
-          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {builtinError ? (
-              <span style={{ fontSize: 12, color: 'var(--danger)' }} title={builtinError}>
-                引擎状态不可用（{builtinError.slice(0, 40)}）· 完全重启应用后重试
-              </span>
-            ) : builtin ? (
-              <>
-                <span style={{ fontSize: 12, color: builtin.enabled ? (builtin.running ? 'var(--ok)' : 'var(--accent)') : 'var(--fg-faint)' }}>
-                  {builtin.enabled ? (builtin.running ? '● 运行中' : '● 已启用(待拉起)') : builtin.installed ? '○ 已安装·未启用' : '○ 未安装'}
-                </span>
-                <button type="button" className={`btn small ${builtin.enabled ? 'ghost' : 'primary'}`} disabled={builtinBusy} onClick={() => void toggleBuiltin()}>
-                  {builtinBusy ? '处理中…' : builtin.enabled ? '停用' : builtin.installed ? '启用' : '下载并启用（约 40MB）'}
-                </button>
-              </>
-            ) : (
-              <span style={{ fontSize: 12, color: 'var(--fg-faint)' }}>检测中…</span>
-            )}
-          </span>
-        </div>
-        <div className="settings-row">
-          <span>小红书 · 自定义服务地址（高级）</span>
-          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input className="settings-input" style={{ width: 240 }} placeholder="http://127.0.0.1:5556（留空跟随内置）" value={mpXhs} onChange={(e) => { setMpXhs(e.target.value); setMpResult({}) }} />
-            <button type="button" className="btn small ghost" disabled={!mpXhs.trim() || mpTesting !== null} onClick={() => void testMp('xhs')}>
-              {mpTesting === 'xhs' ? '测试中…' : '测试'}
-            </button>
-            {mpResult.xhs !== undefined ? <span className={mpResult.xhs ? 'settings-value ok' : ''} style={{ fontSize: 12 }}>{mpResult.xhs ? '在线' : '离线'}</span> : null}
-          </span>
-        </div>
-        <div className="settings-row">
-          <span>抖音 · Douyin_TikTok_Download_API</span>
-          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input className="settings-input" style={{ width: 240 }} placeholder="http://127.0.0.1:8080" value={mpDy} onChange={(e) => { setMpDy(e.target.value); setMpResult({}) }} />
-            <button type="button" className="btn small ghost" disabled={!mpDy.trim() || mpTesting !== null} onClick={() => void testMp('douyin')}>
-              {mpTesting === 'douyin' ? '测试中…' : '测试'}
-            </button>
-            {mpResult.douyin !== undefined ? <span className={mpResult.douyin ? 'settings-value ok' : ''} style={{ fontSize: 12 }}>{mpResult.douyin ? '在线' : '离线'}</span> : null}
-          </span>
-        </div>
-        <p style={{ color: 'var(--fg-faint)', fontSize: 12, lineHeight: 1.8, margin: '8px 0 10px' }}>
-          启动方式：XHS-Downloader 运行 <code>python main.py api</code>（默认端口 5556，Docker 同理）；抖音服务用 Docker：<code>docker run -d -p 8080:80 evil0ctal/douyin_tiktok_download_api</code>（需在其配置里填入抖音 Cookie）。
-        </p>
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <button type="button" className="btn primary" onClick={() => void saveMediaParser()}>保存服务地址</button>
         </div>
       </section>
 

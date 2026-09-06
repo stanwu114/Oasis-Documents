@@ -1,6 +1,6 @@
-import { app, BrowserWindow, protocol, net } from 'electron'
+import { app, BrowserWindow, protocol } from 'electron'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { localMediaResponse } from './media-response'
 import { registerIpc } from './ipc'
 import { closeDb, getDb } from './db'
 import { startWatching, stopWatching, onIndexProgress } from './indexer/watcher'
@@ -57,7 +57,7 @@ function registerMediaProtocol(): void {
     if (!filePath || !(IMAGE_EXT.test(filePath) || VIDEO_EXT.test(filePath))) {
       return new Response(null, { status: 403 })
     }
-    return net.fetch(pathToFileURL(filePath).toString())
+    return localMediaResponse(filePath, request)
   })
 }
 
@@ -122,10 +122,6 @@ app.whenReady().then(() => {
   const win = createWindow()
   win.once('ready-to-show', () => {
     setImmediate(() => setImmediate(() => {
-      /* 内置小红书引擎:启用过则后台拉起(解析请求到来前就绪) */
-      void import('./platforms/xhs-sidecar').then((m) => {
-        if (m.builtinXhsEnabled()) void m.startXhsSidecar().catch(() => false)
-      })
       const queued = reindexPending()
       if (queued > 0) console.log(`[embed-pipeline] 空闲补扫 ${queued} 条待嵌入内容`)
     }))
@@ -159,12 +155,6 @@ app.on('will-quit', (event) => {
       await stopWatching()
     } catch {
       /* watcher 关闭失败不阻塞退出 */
-    }
-    try {
-      const { stopXhsSidecar } = await import('./platforms/xhs-sidecar')
-      stopXhsSidecar()
-    } catch {
-      /* 内置引擎退出失败不阻塞 */
     }
     try {
       const { flushAll } = await import('./indexer/embedding-pipeline')

@@ -5,6 +5,8 @@
    ================================================================ */
 
 export interface ShareInfo {
+  rawText: string
+  shareCode?: string
   url: string | null
   text: string /* 去 URL、去口令词后的描述文案 */
   hashtags: string[] /* 文案里的 #话题 */
@@ -29,23 +31,28 @@ const NOISE_RE = [
 
 export function parseShareText(input: string): ShareInfo {
   const raw = input.trim()
-  if (!raw) return { url: null, text: '', hashtags: [] }
+  if (!raw) return { rawText: raw, url: null, text: '', hashtags: [] }
 
   let url: string | null = null
-  let rest = raw
+  let rest = raw.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$2')
+  const normalized = rest
+  const prefix = /^\s*[“”"']?\d[\s\S]*?(?=[\u4e00-\u9fff])/.exec(rest)?.[0]
+  const shareCode = prefix?.trim()
 
-  const withProto = raw.match(URL_RE)
+  const withProto = normalized.match(URL_RE)
   if (withProto) {
     url = withProto[0]
     rest = rest.replace(url, ' ')
   } else {
-    const bare = raw.match(BARE_RE)
+    const bare = normalized.match(BARE_RE)
     if (bare) {
       url = bare[0].startsWith('http') ? bare[0] : `https://${bare[0]}`
       rest = rest.replace(bare[0], ' ')
     }
   }
 
+  if (prefix) rest = rest.replace(prefix, '')
+  rest = rest.replace(/复制此链接[\s\S]*$/, '').replace(/#\s+/g, '#')
   /* 清洗口令噪音 */
   for (const re of NOISE_RE) rest = rest.replace(re, ' ')
   rest = rest.replace(/\s+/g, ' ').trim()
@@ -61,5 +68,14 @@ export function parseShareText(input: string): ShareInfo {
 
   const hashtags = [...rest.matchAll(/#([^\s#,，、]+)/g)].map((m) => m[1]).slice(0, 8)
 
-  return { url, text: rest, hashtags }
+  return { rawText: raw, shareCode, url, text: rest, hashtags }
+}
+
+/** 分享描述只用于核对身份；识别不到描述时仍靠作品 ID。 */
+export function matchesShareDescription(description: string, actual: string): boolean {
+  const normalize = (value: string): string => value.split('#')[0].replace(/[^\p{L}\p{N}]/gu, '').toLowerCase()
+  const expected = normalize(description)
+  const received = normalize(actual)
+  if (expected.length < 8) return true
+  return Boolean(received) && (received.includes(expected.slice(0, 16)) || (received.length >= 8 && expected.includes(received)))
 }

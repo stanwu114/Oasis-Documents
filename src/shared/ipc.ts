@@ -1,3 +1,5 @@
+export interface PlatformProgress { message?: string; phase: 'parsing' | 'downloading' | 'saving'; completed?: number; total?: number }
+
 /* ================================================================
    IPC 契约 — 主进程 ↔ 渲染进程
    ================================================================ */
@@ -334,25 +336,14 @@ export interface OasisAPI {
 
   /* 平台收藏（L1 链接导入） */
   platform: {
-    importLink(url: string): Promise<{ platform: string; title: string; created: boolean; id: string; images: number; video: boolean }>
+    importLink(url: string): Promise<{ platform: string; title: string; created: boolean; id: string; images: number; video: boolean; warnings: string[] }>
+    onProgress(callback: (progress: PlatformProgress) => void): () => void
     listPlugins(): Promise<{ id: string; label: string }[]>
     listContents(): Promise<PlatformListRow[]>
     /** 删除一条收藏(仅 webpage 类型):行/笔记/FTS/向量/缩略图级联清理 */
     remove(id: string): Promise<{ removed: boolean }>
     /** 重新抓取图文:全量下载图片/视频到本地并更新正文(保留标签) */
-    refresh(id: string): Promise<{ ok: boolean; images: number; video: boolean }>
-    /** 外部解析服务配置(XHS-Downloader / Douyin_TikTok_Download_API,可选) */
-    mediaParser: {
-      get(): Promise<{ xhs?: string; douyin?: string; builtinXhs?: boolean }>
-      set(conf: { xhs?: string; douyin?: string; builtinXhs?: boolean }): Promise<void>
-      test(base: string): Promise<boolean>
-      /** 内置小红书引擎(XHS-Downloader,应用托管) */
-      builtin: {
-        status(): Promise<{ installed: boolean; running: boolean; enabled: boolean }>
-        enable(): Promise<boolean>
-        disable(): Promise<void>
-      }
-    }
+    refresh(id: string): Promise<{ ok: boolean; images: number; video: boolean; warnings: string[] }>
     retag(): Promise<number>
   }
 

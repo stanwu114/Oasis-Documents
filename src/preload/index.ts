@@ -64,21 +64,16 @@ const api: OasisAPI = {
     setEncrypted: (key, value) => ipcRenderer.invoke('settings:setEncrypted', key, value)
   },
   platform: {
+    onProgress: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, progress: import('../shared/ipc').PlatformProgress): void => callback(progress)
+      ipcRenderer.on('platform:progress', listener)
+      return () => { ipcRenderer.removeListener('platform:progress', listener) }
+    },
     importLink: (url) => ipcRenderer.invoke('platform:importLink', url),
     listPlugins: () => ipcRenderer.invoke('platform:listPlugins'),
     listContents: () => ipcRenderer.invoke('platform:listContents'),
     remove: (id) => ipcRenderer.invoke('platform:remove', id),
     refresh: (id) => ipcRenderer.invoke('platform:refresh', id),
-    mediaParser: {
-      get: () => ipcRenderer.invoke('mediaParser:get'),
-      set: (conf) => ipcRenderer.invoke('mediaParser:set', conf),
-      test: (base) => ipcRenderer.invoke('mediaParser:test', base),
-      builtin: {
-        status: () => ipcRenderer.invoke('mediaParser:builtinStatus'),
-        enable: () => ipcRenderer.invoke('mediaParser:builtinEnable'),
-        disable: () => ipcRenderer.invoke('mediaParser:builtinDisable')
-      }
-    },
     retag: () => ipcRenderer.invoke('platform:retag')
   },
   notes: {

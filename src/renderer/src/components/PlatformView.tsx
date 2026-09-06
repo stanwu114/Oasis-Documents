@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Icon } from './Icon'
 import { useUiStore } from '../stores/uiStore'
 import { toMediaUrl } from '../lib/media'
@@ -23,7 +23,11 @@ function fmtDate(ts: number): string {
 }
 
 export function PlatformView(): React.ReactNode {
+  const importLock = useRef(false)
   const [url, setUrl] = useState('')
+  const [importError, setImportError] = useState('')
+  const [progress, setProgress] = useState('正在解析帖子…')
+  const contentsVersion = useUiStore((s) => s.contentsVersion)
   const [importing, setImporting] = useState(false)
   const [retagging, setRetagging] = useState(false)
   const [rows, setRows] = useState<PlatformRow[]>([])
@@ -32,34 +36,47 @@ export function PlatformView(): React.ReactNode {
 
   useEffect(() => {
     void load()
-  }, [])
+  }, [contentsVersion])
+  useEffect(() => window.oasis.platform.onProgress((p) => {
+    setProgress(p.message ?? (p.phase === 'parsing' ? '正在解析帖子…' : p.phase === 'saving' ? '正在保存本地内容…' : `正在下载图片和视频 ${p.completed ?? 0} / ${p.total ?? 0}`))
+  }), [])
 
   const load = async (): Promise<void> => {
     setRows(await window.oasis.platform.listContents())
   }
 
-  const onImport = async (): Promise<void> => {
-    const u = url.trim()
-    if (!u) return
+  const onImport = async (value = url): Promise<void> => {
+    const u = value.trim()
+    if (!u || importLock.current) return
+    importLock.current = true
+    setImportError('')
+    setProgress('正在解析帖子…')
     setImporting(true)
     try {
       const r = await window.oasis.platform.importLink(u)
-      if (r.images > 0 || r.video) {
+      if (r.warnings.length) {
+        setImportError(`正文已保存，媒体下载未完成：${r.warnings.join('；')}`)
+        useUiStore.getState().showToast(`正文已保存，部分媒体未下载：${r.warnings[0]}，可在详情中重试。`, 'error')
+      } else if (r.images > 0 || r.video) {
         useUiStore.getState().showToast(
           `${r.created ? '已导入' : '已更新'}「${r.title}」· ${r.images} 张图${r.video ? ' · 含视频' : ''}`
         )
       } else {
         /* 空图文可见化:给出可执行的下一步,而不是静默成功 */
         useUiStore.getState().showToast(
-          `已保存「${r.title}」,但未抓到图文(可能被风控)。建议:设置 → 启用内置小红书引擎后,详情页点「重新抓取图文」`,
+          `已保存「${r.title}」,未下载到图片或视频。请确认原帖公开可访问，重新复制完整分享链接后再试`,
           'error'
         )
       }
       setUrl('')
+      useUiStore.getState().bumpContents()
       await load()
     } catch (e) {
-      useUiStore.getState().showToast(`导入失败：${e instanceof Error ? e.message : e}`, 'error')
+      const message = `导入失败：${e instanceof Error ? e.message : e}`
+      setImportError(message)
+      useUiStore.getState().showToast(message, 'error')
     } finally {
+      importLock.current = false
       setImporting(false)
     }
   }
@@ -104,7 +121,7 @@ export function PlatformView(): React.ReactNode {
             {collectionPlatform ? `我的收藏 · ${platformLabel(collectionPlatform)}` : '我的收藏'}
           </h1>
           <p className="view-sub" style={{ marginBottom: 0 }}>
-            粘贴小红书 / 抖音 / 微信 / CSDN 分享链接 · 导入时自动 AI 打标
+            粘贴小红书 / 抖音 / 微信 / CSDN 分享链接 · 图文和视频保存到本地
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
@@ -120,18 +137,31 @@ export function PlatformView(): React.ReactNode {
       </div>
 
       <div className="platform-import-bar">
-        <input
+        <textarea
+          rows={3}
+          disabled={importing}
           className="settings-input"
           style={{ flex: 1 }}
-          placeholder="直接粘贴整段分享文案（自动识别链接，支持小红书 / 抖音 / 公众号 / CSDN）"
+          placeholder="粘贴完整分享文案后自动导入，支持抖音 / 小红书 / 公众号 / CSDN"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && void onImport()}
+          onPaste={(e) => {
+            const text = e.clipboardData.getData('text')
+            if (!/https?:\/\//i.test(text) || importLock.current) return
+            e.preventDefault()
+            setUrl(text)
+            void onImport(text)
+          }}
+          onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void onImport() } }}
         />
         <button type="button" className="btn primary" onClick={() => void onImport()} disabled={importing}>
-          {importing ? '解析中…' : '导入'}
+          {importing ? '导入中…' : '导入'}
         </button>
       </div>
+
+      {importing ? <p role="status" className="view-sub">{progress} · 下载超时会提示，失败后可重试</p> : null}
+
+      {importError ? <p role="alert" style={{ color: 'var(--danger)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{importError}</p> : null}
 
       {tagCloud.length > 0 ? (
         <div className="platform-tagcloud">
@@ -158,7 +188,7 @@ export function PlatformView(): React.ReactNode {
             const r = filtered.find((x) => x.id === _it.key)
             if (!r) return null
             /* 本地缩略图优先;缺失时回退收藏时抓到的原图列表第一张 */
-            const cover = r.thumbnail_path ? toMediaUrl(r.thumbnail_path) : (r.image_urls[0] ?? undefined)
+            const cover = r.thumbnail_path ? toMediaUrl(r.thumbnail_path) : (r.image_urls[0] ? (/^https?:/.test(r.image_urls[0]) ? r.image_urls[0] : toMediaUrl(r.image_urls[0])) : undefined)
             return (
               <a
                 key={r.id}
